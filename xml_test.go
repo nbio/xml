@@ -980,14 +980,14 @@ func TestIssue11496(t *testing.T) { // Issue answered
 		Phone: "110",
 	}
 
-	raw, err := MarshalIndent(p, "", "  ")
+	got, err := Marshal(p)
 	if err != nil {
-		fmt.Errorf("namespace assignment : marshal error returned is %s", err)
+		t.Errorf("namespace assignment: marshal error returned is %s", err)
 	}
 
-	result := `<person xmlns="ns1">\n\t<name>Oliver</name>\n\t<phone xmlns="ns2">110</phone>\n</person>"`
-	if string(raw) != result {
-		fmt.Errorf("namespace assignment : got %s, want %s", string(raw), result)
+	want := `<person xmlns="ns1"><name>Oliver</name><phone xmlns="ns2">110</phone></person>`
+	if string(got) != want {
+		t.Errorf("namespace assignment:\ngot:  %s\nwant: %s", string(got), want)
 	}
 
 	// Output:
@@ -997,7 +997,7 @@ func TestIssue11496(t *testing.T) { // Issue answered
 	// </person>
 	//
 	// Want:
-	// <person xmlns="ns1" xmlns:ns2="n2">
+	// <person xmlns="ns1" xmlns:ns2="ns2">
 	//   <name>Oliver</name>
 	//   <ns2:phone>110</ns2:phone>
 	// </person>
@@ -1343,14 +1343,14 @@ func TestIssue16497(t *testing.T) {
 	var err error
 	err = Unmarshal([]byte(`<iq/>`), &resp)
 	if err != nil {
-		fmt.Errorf("unmarshal anonymous struct failed with %s", err)
+		t.Errorf("unmarshal anonymous struct failed with %s", err)
 		return
 	}
 	// assigning values or not does not change anything
 	var respEmbed embedIQ
 	err = Unmarshal([]byte(`<iq/>`), &respEmbed)
 	if err != nil {
-		fmt.Errorf("unmarshal anonymous struct failed with %s", err)
+		t.Errorf("unmarshal anonymous struct failed with %s", err)
 		return
 	}
 }
