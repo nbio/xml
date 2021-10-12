@@ -34,3 +34,11 @@ https://play.golang.org/p/-6Ee8tcLl2L
 // Instead of "encoding/xml"
 import "github.com/nbio/xml"
 ```
+
+## Development
+
+To ease keeping this code in sync with a fork of Go, this repository contains a `go.mod` file in `vendor/go/src` that declares itself as the `std` package. This package must be tested from that directory:
+
+```shell
+cd vendor/go/src && go test -v ./encoding/xml
+```
