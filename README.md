@@ -1,6 +1,6 @@
-# encoding/xml
+# `encoding/xml` with namespaces
 
-This is a fork of the Go encoding/xml package that improves support for XML namespaces, kept in sync with [golang/go#48641](https://github.com/golang/go/pull/48641).
+This is a fork of the Go [encoding/xml](https://pkg.go.dev/encoding/xml) package that improves support for XML namespaces, kept in sync with [golang/go#48641](https://github.com/golang/go/pull/48641).
 
 It allows round-trip unmarshaling/marshaling with explicit namespace prefixes. For example, this can be unmarshalled and re-marshalled into this precise XML:
 
