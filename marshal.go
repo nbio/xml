@@ -773,22 +773,15 @@ func (p *printer) writeStart(start *StartElement) error {
 	// Set the namespace prefix, if necessary
 	var spaceDefined bool
 	if e.xmlns != "" {
-		// Locate an eventual prefix. If none, the XML is <tag name and no short notation is used
-		if e.prefix == "" {
-			// Look for an xmlns:prefix="uri" attribute that matches tag
-			for _, attr := range start.Attr {
-				if attr.Name.Space == xmlnsURL && attr.Name.Local != "" && attr.Value == e.xmlns {
-					e.prefix, _ = p.createPrefix(attr.Value, attr.Name.Local)
-					// if e.prefix != attr.Name.Local {
-					// 	return fmt.Errorf("xml: prefix xmlns:%s=%q already defined", attr.Name.Local, attr.Value)
-					// }
-					spaceDefined = true
-					break
-				}
+		// Try to avoid needing a prefix first.
+		for _, attr := range start.Attr {
+			if attr.Name.Space == "" && attr.Name.Local == xmlnsPrefix && attr.Value == e.xmlns {
+				spaceDefined = true
+				break
 			}
 		}
-		if e.prefix == "" {
-			// Walk up the tree to see if a default namespace is already defined (without a prefix)
+		// Walk up the tree to see if a default namespace is already defined without a prefix.
+		if !spaceDefined && e.prefix == "" {
 			for i := len(p.elements) - 2; i >= 0; i-- {
 				if p.elements[i].prefix == "" && p.elements[i].xmlns == e.xmlns {
 					spaceDefined = true
@@ -796,12 +789,14 @@ func (p *printer) writeStart(start *StartElement) error {
 				}
 			}
 		}
-		if !spaceDefined {
+		// Locate an eventual prefix. If none, the XML is <tag name and no short notation is used
+		if !spaceDefined && e.prefix == "" {
+			// Look for an xmlns:prefix="uri" attribute that matches tag
 			for _, attr := range start.Attr {
-				// attributes values which are namespaces are searched to avoid reprinting the default
-				if attr.Name.Space == "" && attr.Name.Local == xmlnsPrefix && attr.Value == e.xmlns {
+				if attr.Name.Space == xmlnsURL && attr.Name.Local != "" && attr.Value == e.xmlns {
+					e.prefix, _ = p.createPrefix(attr.Value, attr.Name.Local)
 					spaceDefined = true
-					break // the first attribute which is a default declaration that matches is kept
+					break
 				}
 			}
 		}
