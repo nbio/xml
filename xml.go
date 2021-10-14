@@ -332,7 +332,7 @@ func (d *Decoder) Token() (Token, error) {
 		}
 
 		d.pushElement(t1.Name) // Pushing the element with its eventual prefix
-		/* Assigning value to Space of the attributed using the NS bindings */
+		// Assigning value to Space of the attributed using the NS bindings
 		d.translate(&t1.Name, true)
 		for i := range t1.Attr {
 			d.translate(&t1.Attr[i].Name, false)
@@ -358,11 +358,10 @@ const (
 // Apply name space translation to name n.
 // The default name space (for Space=="")
 // applies only to element names, not to attribute names.
-// Namespace attributes are xmlns=".Value" with .Local empty or a prefix (.Space)xmlns:.Local(prefix)=.Value
-// They are never translated
 func (d *Decoder) translate(n *Name, isElementName bool) {
 	switch {
 	case n.Space == xmlnsPrefix:
+		n.Space = xmlnsURL
 		return
 	case n.Space == "" && !isElementName:
 		return
@@ -371,7 +370,6 @@ func (d *Decoder) translate(n *Name, isElementName bool) {
 	case n.Space == "" && n.Local == xmlnsPrefix:
 		return
 	}
-	// No namespace here
 	if v, ok := d.ns[n.Space]; ok {
 		n.Space = v
 	} else if n.Space == "" {
@@ -810,7 +808,7 @@ func (d *Decoder) rawToken() (Token, error) {
 		return nil, d.err
 	}
 
-	attr = []Attr{} // To return empty and not nil when unmarshaling
+	attr = []Attr{}
 	for {
 		d.space()
 		if b, ok = d.mustgetc(); !ok {
@@ -831,7 +829,7 @@ func (d *Decoder) rawToken() (Token, error) {
 			break
 		}
 		if b == '>' {
-			break // The only valid exit is end of tag
+			break
 		}
 		d.ungetc(b)
 
@@ -844,12 +842,11 @@ func (d *Decoder) rawToken() (Token, error) {
 		}
 		d.space()
 		if b, ok = d.mustgetc(); !ok {
-			// d.err = d.syntaxError("expected attribute name in element")
 			return nil, d.err
 		}
-		if b != '=' { // nsname.Local is the attribute name if xmlns is present otherwise err was returned
-			if d.Strict { // Unmarshal is always strict as it uses Token
-				d.err = d.syntaxError("expected = after attribute name")
+		if b != '=' {
+			if d.Strict {
+				d.err = d.syntaxError("attribute name without = in element")
 				return nil, d.err
 			}
 			a.Value = a.Name.Local
@@ -1035,7 +1032,7 @@ Input:
 			d.ungetc('<')
 			break Input
 		}
-		/* This occurs only for an unquoted attr name */
+		// This occurs only for an unquoted attr name.
 		if b == '>' && !cdata && quote < 0 { // Possible end of tag reached
 			d.ungetc('>') // Leaving end of tag available
 			break         // returning text
@@ -1148,7 +1145,7 @@ Input:
 		b0, b1 = b1, b
 	}
 	data := d.buf.Bytes()
-	data = data[0 : len(data)-trunc] // trunc only removes end of cdata
+	data = data[0 : len(data)-trunc]
 
 	// Inspect each rune for being a disallowed character.
 	buf := data
@@ -1237,7 +1234,7 @@ func (d *Decoder) readName() (ok bool) {
 
 	for {
 		if b, ok = d.mustgetc(); !ok {
-			return true // Returning default probably when true is correct. Unnamed attribute is allowed
+			return
 		}
 		if b < utf8.RuneSelf && !isNameByte(b) {
 			d.ungetc(b)

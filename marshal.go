@@ -375,9 +375,9 @@ func (p *printer) getPrefix(uri string) string {
 	return ""
 }
 
-// createPrefix finds the name space prefix attribute to use for the given namespace,
+// createPrefix finds a prefix to use for the given namespace,
 // defining a new prefix if necessary. It returns the prefix.
-// It will attempt to use preferred as the prefix if set.
+// If set, it will attempt to use preferred as the prefix.
 func (p *printer) createPrefix(uri, preferred string) (string, bool) {
 	if prefix := p.getPrefix(uri); prefix != "" && (prefix == preferred || preferred == "") {
 		return prefix, false
@@ -565,14 +565,14 @@ func (p *printer) marshalValue(val reflect.Value, finfo *fieldInfo, startTemplat
 		if finfo.xmlns != "" && finfo.xmlns != start.Name.Space && finfo.prefix != "" && finfo.prefix != p.getPrefix(finfo.xmlns) {
 			var prefixDefined bool
 			for _, attr := range start.Attr {
-				if attr.Name.Space == xmlnsPrefix && attr.Name.Local != "" && attr.Value == finfo.xmlns {
+				if attr.Name.Space == xmlnsURL && attr.Name.Local != "" && attr.Value == finfo.xmlns {
 					prefixDefined = true
 					break
 				}
 			}
 			if !prefixDefined {
 				start.Attr = append(start.Attr, Attr{
-					Name:  Name{xmlnsPrefix, finfo.prefix},
+					Name:  Name{xmlnsURL, finfo.prefix},
 					Value: finfo.xmlns,
 				})
 			}
@@ -777,7 +777,7 @@ func (p *printer) writeStart(start *StartElement) error {
 		if e.prefix == "" {
 			// Look for an xmlns:prefix="uri" attribute that matches tag
 			for _, attr := range start.Attr {
-				if attr.Name.Space == xmlnsPrefix && attr.Name.Local != "" && attr.Value == e.xmlns {
+				if attr.Name.Space == xmlnsURL && attr.Name.Local != "" && attr.Value == e.xmlns {
 					e.prefix, _ = p.createPrefix(attr.Value, attr.Name.Local)
 					// if e.prefix != attr.Name.Local {
 					// 	return fmt.Errorf("xml: prefix xmlns:%s=%q already defined", attr.Name.Local, attr.Value)
@@ -845,8 +845,8 @@ func (p *printer) writeStart(start *StartElement) error {
 		}
 		prefix, local := splitPrefixed(attr.Name.Local)
 		p.WriteByte(' ')
-		if attr.Name.Space == xmlnsPrefix {
-			p.createPrefix(attr.Value, attr.Name.Local)
+		if attr.Name.Space == xmlnsURL {
+			p.createPrefix(attr.Value, local)
 			p.WriteString(xmlnsPrefix)
 			p.WriteByte(':')
 		} else if attr.Name.Space != "" {

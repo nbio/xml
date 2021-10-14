@@ -182,7 +182,7 @@ var cookedTokens = []Token{
 	Directive(`DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
   "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"`),
 	CharData("\n"),
-	StartElement{Name{"ns2", "body"}, []Attr{{Name{"xmlns", "foo"}, "ns1"}, {Name{"", "xmlns"}, "ns2"}, {Name{"xmlns", "tag"}, "ns3"}}},
+	StartElement{Name{"ns2", "body"}, []Attr{{Name{"http://www.w3.org/2000/xmlns/", "foo"}, "ns1"}, {Name{"", "xmlns"}, "ns2"}, {Name{"http://www.w3.org/2000/xmlns/", "tag"}, "ns3"}}},
 	CharData("\n  "),
 	StartElement{Name{"ns2", "hello"}, []Attr{{Name{"", "lang"}, "en"}}},
 	CharData("World <>'\" 白鵬翔"),
@@ -195,7 +195,7 @@ var cookedTokens = []Token{
 	StartElement{Name{"ns2", "goodbye"}, []Attr{}},
 	EndElement{Name{"ns2", "goodbye"}},
 	CharData("\n  "),
-	StartElement{Name{"ns2", "outer"}, []Attr{{Name{"ns1", "attr"}, "value"}, {Name{"xmlns", "tag"}, "ns4"}}},
+	StartElement{Name{"ns2", "outer"}, []Attr{{Name{"ns1", "attr"}, "value"}, {Name{"http://www.w3.org/2000/xmlns/", "tag"}, "ns4"}}},
 	CharData("\n    "),
 	StartElement{Name{"ns2", "inner"}, []Attr{}},
 	EndElement{Name{"ns2", "inner"}},
