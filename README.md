@@ -1,4 +1,4 @@
-# `encoding/xml` with namespaces
+# `encoding/xml` with namespace prefixes
 
 This is a fork of the Go [encoding/xml](https://pkg.go.dev/encoding/xml) package that improves support for XML namespaces, kept in sync with [golang/go#48641](https://github.com/golang/go/pull/48641).
 
