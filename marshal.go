@@ -347,8 +347,7 @@ type printer struct {
 	elements   []element
 }
 
-// getPrefix finds the name space prefix attribute to use for the given namespace,
-// but does not create it if it does not exist.
+// getPrefix finds the prefix to use for the given namespace URI, but does not create it.
 func (p *printer) getPrefix(uri string) string {
 	switch uri {
 	case xmlURL:
@@ -375,7 +374,7 @@ func (p *printer) getPrefix(uri string) string {
 	return ""
 }
 
-// createPrefix finds a prefix to use for the given namespace,
+// createPrefix finds a prefix to use for the given namespace URI,
 // defining a new prefix if necessary. It returns the prefix.
 // If set, it will attempt to use preferred as the prefix.
 func (p *printer) createPrefix(uri, preferred string) (string, bool) {
@@ -547,9 +546,13 @@ func (p *printer) marshalValue(val reflect.Value, finfo *fieldInfo, startTemplat
 		start.Name.Local = name
 	}
 
-	// Iterate over struct fields
+	// Attributes
 	for i := range tinfo.fields {
 		finfo := &tinfo.fields[i]
+		if finfo.flags&fAttr == 0 {
+			continue
+		}
+
 		fv := finfo.value(val, dontInitNilPointers)
 
 		if finfo.flags&fOmitEmpty != 0 && isEmptyValue(fv) {
@@ -560,30 +563,9 @@ func (p *printer) marshalValue(val reflect.Value, finfo *fieldInfo, startTemplat
 			continue
 		}
 
-		// Define namespace prefix attributes, if necessary.
-		// The namespace for the start tag will be defined in writeStart.
-		if finfo.xmlns != "" && finfo.xmlns != start.Name.Space && finfo.prefix != "" && finfo.prefix != p.getPrefix(finfo.xmlns) {
-			var prefixDefined bool
-			for _, attr := range start.Attr {
-				if attr.Name.Space == xmlnsURL && attr.Name.Local != "" && attr.Value == finfo.xmlns {
-					prefixDefined = true
-					break
-				}
-			}
-			if !prefixDefined {
-				start.Attr = append(start.Attr, Attr{
-					Name:  Name{xmlnsURL, finfo.prefix},
-					Value: finfo.xmlns,
-				})
-			}
-		}
-
-		// Attributes
-		if finfo.flags&fAttr != 0 {
-			name := Name{finfo.xmlns, joinPrefixed(finfo.prefix, finfo.name)}
-			if err := p.marshalAttr(&start, name, fv); err != nil {
-				return err
-			}
+		name := Name{finfo.xmlns, joinPrefixed(finfo.prefix, finfo.name)}
+		if err := p.marshalAttr(&start, name, fv); err != nil {
+			return err
 		}
 	}
 
