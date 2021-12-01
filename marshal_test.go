@@ -2061,6 +2061,22 @@ var encodeTokenTests = []struct {
 	},
 	want: `<local xmlns="space">`,
 }, {
+	desc: "self-closing element with namespace",
+	toks: []Token{
+		SelfClosingElement{Name{"space", "local"}, nil},
+	},
+	want: `<local xmlns="space"/>`,
+}, {
+	desc: "self-closing elements inside other elements",
+	toks: []Token{
+		StartElement{Name{"", "outer"}, nil},
+		SelfClosingElement{Name{"", "a"}, nil},
+		SelfClosingElement{Name{"", "b"}, nil},
+		SelfClosingElement{Name{"", "c"}, nil},
+		EndElement{Name{"", "outer"}},
+	},
+	want: `<outer><a/><b/><c/></outer>`,
+}, {
 	desc: "start element with no name",
 	toks: []Token{
 		StartElement{Name{"space", ""}, nil},
