@@ -580,6 +580,14 @@ func (p *printer) marshalValue(val reflect.Value, finfo *fieldInfo, startTemplat
 		start.Attr = append(start.Attr, Attr{Name{"", xmlnsPrefix}, ""})
 	}
 
+	// If this is a self-closing tag, write the tag and return.
+	if finfo != nil && finfo.flags&fSelfClosing != 0 {
+		if err := p.writeStart(&start, true); err != nil {
+			return err
+		}
+		return p.cachedWriteError()
+	}
+
 	if err := p.writeStart(&start, false); err != nil {
 		return err
 	}

@@ -526,8 +526,11 @@ type IfaceAny struct {
 
 type EPP struct {
 	XMLName struct{} `xml:"urn:ietf:params:xml:ns:epp-1.0 epp"`
+	Hello   *Hello   `xml:"hello,omitempty,selfclosing"`
 	Command *Command `xml:"command,omitempty"`
 }
+
+type Hello struct{}
 
 type Command struct {
 	Check *Check `xml:"urn:ietf:params:xml:ns:epp-1.0 check,omitempty"`
@@ -1697,6 +1700,10 @@ var marshalTests = []struct {
 	{
 		ExpectXML: `<epp xmlns="urn:ietf:params:xml:ns:epp-1.0"></epp>`,
 		Value:     &EPP{},
+	},
+	{
+		ExpectXML: `<epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><hello/></epp>`,
+		Value:     &EPP{Hello: &Hello{}},
 	},
 	{
 		ExpectXML: `<epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><command></command></epp>`,
