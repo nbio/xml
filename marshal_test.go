@@ -532,6 +532,11 @@ type EPP struct {
 
 type Hello struct{}
 
+type Closer struct {
+	XMLName  struct{} `xml:"closer,selfclosing"`
+	Beverage string   `xml:"beverage,attr,omitempty"`
+}
+
 type Command struct {
 	Check *Check `xml:"urn:ietf:params:xml:ns:epp-1.0 check,omitempty"`
 }
@@ -1694,6 +1699,16 @@ var marshalTests = []struct {
 		ExpectXML:     `<DirectFoo><T1></T1><Foo></Foo><T2></T2></DirectFoo>`,
 		Value:         &DirectAny{Any: string("")},
 		UnmarshalOnly: true,
+	},
+
+	// Test self-closing tags
+	{
+		ExpectXML: `<closer/>`,
+		Value:     &Closer{},
+	},
+	{
+		ExpectXML: `<closer beverage="coffee"/>`,
+		Value:     &Closer{Beverage: "coffee"},
 	},
 
 	// Test namespace prefixes

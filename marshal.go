@@ -581,7 +581,8 @@ func (p *printer) marshalValue(val reflect.Value, finfo *fieldInfo, startTemplat
 	}
 
 	// If this is a self-closing tag, write the tag and return.
-	if finfo != nil && finfo.flags&fSelfClosing != 0 {
+	if finfo != nil && finfo.flags&fSelfClosing != 0 ||
+		tinfo.xmlname != nil && tinfo.xmlname.flags&fSelfClosing != 0 {
 		if err := p.writeStart(&start, true); err != nil {
 			return err
 		}
