@@ -1951,9 +1951,9 @@ func escapeText(w io.Writer, s []byte, escapeNewline bool) error {
 	return err
 }
 
-// EscapeString writes to p the properly escaped XML equivalent
+// escapeString writes to p the properly escaped XML equivalent
 // of the plain text data s.
-func (p *printer) EscapeString(s string) {
+func (enc *Encoder) escapeString(s string) {
 	var esc []byte
 	last := 0
 	for i := 0; i < len(s); {
@@ -1983,11 +1983,11 @@ func (p *printer) EscapeString(s string) {
 			}
 			continue
 		}
-		p.WriteString(s[last : i-width])
-		p.Write(esc)
+		enc.w.WriteString(s[last : i-width])
+		enc.w.Write(esc)
 		last = i
 	}
-	p.WriteString(s[last:])
+	enc.w.WriteString(s[last:])
 }
 
 // Escape is like EscapeText but omits the error return value.

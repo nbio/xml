@@ -134,22 +134,30 @@ func MarshalIndent(v interface{}, prefix, indent string) ([]byte, error) {
 
 // An Encoder writes XML data to an output stream.
 type Encoder struct {
-	p printer
+	w          *bufio.Writer
+	seq        int
+	indent     string
+	prefix     string
+	depth      int
+	indentedIn bool
+	putNewline bool
+	attrNS     map[string]string // map prefix -> name space
+	attrPrefix map[string]string // map name space -> prefix
+	prefixes   []string
+	tags       []Name
 }
 
 // NewEncoder returns a new encoder that writes to w.
 func NewEncoder(w io.Writer) *Encoder {
-	e := &Encoder{printer{Writer: bufio.NewWriter(w)}}
-	e.p.encoder = e
-	return e
+	return &Encoder{w: bufio.NewWriter(w)}
 }
 
 // Indent sets the encoder to generate XML in which each element
 // begins on a new indented line that starts with prefix and is followed by
 // one or more copies of indent according to the nesting depth.
 func (enc *Encoder) Indent(prefix, indent string) {
-	enc.p.prefix = prefix
-	enc.p.indent = indent
+	enc.prefix = prefix
+	enc.indent = indent
 }
 
 // Encode writes the XML encoding of v to the stream.
@@ -159,11 +167,11 @@ func (enc *Encoder) Indent(prefix, indent string) {
 //
 // Encode calls Flush before returning.
 func (enc *Encoder) Encode(v interface{}) error {
-	err := enc.p.marshalValue(reflect.ValueOf(v), nil, nil)
+	err := enc.marshalValue(reflect.ValueOf(v), nil, nil)
 	if err != nil {
 		return err
 	}
-	return enc.p.Flush()
+	return enc.Flush()
 }
 
 // EncodeElement writes the XML encoding of v to the stream,
@@ -174,11 +182,11 @@ func (enc *Encoder) Encode(v interface{}) error {
 //
 // EncodeElement calls Flush before returning.
 func (enc *Encoder) EncodeElement(v interface{}, start StartElement) error {
-	err := enc.p.marshalValue(reflect.ValueOf(v), nil, &start)
+	err := enc.marshalValue(reflect.ValueOf(v), nil, &start)
 	if err != nil {
 		return err
 	}
-	return enc.p.Flush()
+	return enc.Flush()
 }
 
 var (
@@ -200,31 +208,29 @@ var (
 // EncodeToken allows writing a ProcInst with Target set to "xml" only as the first token
 // in the stream.
 func (enc *Encoder) EncodeToken(t Token) error {
-
-	p := &enc.p
 	switch t := t.(type) {
 	case StartElement:
-		if err := p.writeStart(&t); err != nil {
+		if err := enc.writeStart(&t); err != nil {
 			return err
 		}
 	case EndElement:
-		if err := p.writeEnd(t.Name); err != nil {
+		if err := enc.writeEnd(t.Name); err != nil {
 			return err
 		}
 	case CharData:
-		escapeText(p, t, false)
+		escapeText(enc.w, t, false)
 	case Comment:
 		if bytes.Contains(t, endComment) {
 			return fmt.Errorf("xml: EncodeToken of Comment containing --> marker")
 		}
-		p.WriteString("<!--")
-		p.Write(t)
-		p.WriteString("-->")
-		return p.cachedWriteError()
+		enc.w.WriteString("<!--")
+		enc.w.Write(t)
+		enc.w.WriteString("-->")
+		return enc.cachedWriteError()
 	case ProcInst:
 		// First token to be encoded which is also a ProcInst with target of xml
 		// is the xml declaration. The only ProcInst where target of xml is allowed.
-		if t.Target == "xml" && p.Buffered() != 0 {
+		if t.Target == "xml" && enc.w.Buffered() != 0 {
 			return fmt.Errorf("xml: EncodeToken of ProcInst xml target only valid for xml declaration, first token encoded")
 		}
 		if !isNameString(t.Target) {
@@ -233,25 +239,25 @@ func (enc *Encoder) EncodeToken(t Token) error {
 		if bytes.Contains(t.Inst, endProcInst) {
 			return fmt.Errorf("xml: EncodeToken of ProcInst containing ?> marker")
 		}
-		p.WriteString("<?")
-		p.WriteString(t.Target)
+		enc.w.WriteString("<?")
+		enc.w.WriteString(t.Target)
 		if len(t.Inst) > 0 {
-			p.WriteByte(' ')
-			p.Write(t.Inst)
+			enc.w.WriteByte(' ')
+			enc.w.Write(t.Inst)
 		}
-		p.WriteString("?>")
+		enc.w.WriteString("?>")
 	case Directive:
 		if !isValidDirective(t) {
 			return fmt.Errorf("xml: EncodeToken of Directive containing wrong < or > markers")
 		}
-		p.WriteString("<!")
-		p.Write(t)
-		p.WriteString(">")
+		enc.w.WriteString("<!")
+		enc.w.Write(t)
+		enc.w.WriteString(">")
 	default:
 		return fmt.Errorf("xml: EncodeToken of invalid token type")
 
 	}
-	return p.cachedWriteError()
+	return enc.cachedWriteError()
 }
 
 // isValidDirective reports whether dir is a valid directive text,
@@ -297,7 +303,7 @@ func isValidDirective(dir Directive) bool {
 // Flush flushes any buffered XML to the underlying writer.
 // See the EncodeToken documentation for details about when it is necessary.
 func (enc *Encoder) Flush() error {
-	return enc.p.Flush()
+	return enc.w.Flush()
 }
 
 type printer struct {
@@ -317,8 +323,8 @@ type printer struct {
 
 // createAttrPrefix finds the name space prefix attribute to use for the given name space,
 // defining a new prefix if necessary. It returns the prefix.
-func (p *printer) createAttrPrefix(url string) string {
-	if prefix := p.attrPrefix[url]; prefix != "" {
+func (enc *Encoder) createAttrPrefix(url string) string {
+	if prefix := enc.attrPrefix[url]; prefix != "" {
 		return prefix
 	}
 
@@ -331,9 +337,9 @@ func (p *printer) createAttrPrefix(url string) string {
 	}
 
 	// Need to define a new name space.
-	if p.attrPrefix == nil {
-		p.attrPrefix = make(map[string]string)
-		p.attrNS = make(map[string]string)
+	if enc.attrPrefix == nil {
+		enc.attrPrefix = make(map[string]string)
+		enc.attrNS = make(map[string]string)
 	}
 
 	// Pick a name. We try to use the final element of the path
@@ -352,48 +358,48 @@ func (p *printer) createAttrPrefix(url string) string {
 	if len(prefix) >= 3 && strings.EqualFold(prefix[:3], "xml") {
 		prefix = "_" + prefix
 	}
-	if p.attrNS[prefix] != "" {
+	if enc.attrNS[prefix] != "" {
 		// Name is taken. Find a better one.
-		for p.seq++; ; p.seq++ {
-			if id := prefix + "_" + strconv.Itoa(p.seq); p.attrNS[id] == "" {
+		for enc.seq++; ; enc.seq++ {
+			if id := prefix + "_" + strconv.Itoa(enc.seq); enc.attrNS[id] == "" {
 				prefix = id
 				break
 			}
 		}
 	}
 
-	p.attrPrefix[url] = prefix
-	p.attrNS[prefix] = url
+	enc.attrPrefix[url] = prefix
+	enc.attrNS[prefix] = url
 
-	p.WriteString(`xmlns:`)
-	p.WriteString(prefix)
-	p.WriteString(`="`)
-	EscapeText(p, []byte(url))
-	p.WriteString(`" `)
+	enc.w.WriteString(`xmlns:`)
+	enc.w.WriteString(prefix)
+	enc.w.WriteString(`="`)
+	EscapeText(enc.w, []byte(url))
+	enc.w.WriteString(`" `)
 
-	p.prefixes = append(p.prefixes, prefix)
+	enc.prefixes = append(enc.prefixes, prefix)
 
 	return prefix
 }
 
 // deleteAttrPrefix removes an attribute name space prefix.
-func (p *printer) deleteAttrPrefix(prefix string) {
-	delete(p.attrPrefix, p.attrNS[prefix])
-	delete(p.attrNS, prefix)
+func (enc *Encoder) deleteAttrPrefix(prefix string) {
+	delete(enc.attrPrefix, enc.attrNS[prefix])
+	delete(enc.attrNS, prefix)
 }
 
-func (p *printer) markPrefix() {
-	p.prefixes = append(p.prefixes, "")
+func (enc *Encoder) markPrefix() {
+	enc.prefixes = append(enc.prefixes, "")
 }
 
-func (p *printer) popPrefix() {
-	for len(p.prefixes) > 0 {
-		prefix := p.prefixes[len(p.prefixes)-1]
-		p.prefixes = p.prefixes[:len(p.prefixes)-1]
+func (enc *Encoder) popPrefix() {
+	for len(enc.prefixes) > 0 {
+		prefix := enc.prefixes[len(enc.prefixes)-1]
+		enc.prefixes = enc.prefixes[:len(enc.prefixes)-1]
 		if prefix == "" {
 			break
 		}
-		p.deleteAttrPrefix(prefix)
+		enc.deleteAttrPrefix(prefix)
 	}
 }
 
@@ -405,7 +411,7 @@ var (
 
 // marshalValue writes one or more XML elements representing val.
 // If val was obtained from a struct field, finfo must have its details.
-func (p *printer) marshalValue(val reflect.Value, finfo *fieldInfo, startTemplate *StartElement) error {
+func (enc *Encoder) marshalValue(val reflect.Value, finfo *fieldInfo, startTemplate *StartElement) error {
 	if startTemplate != nil && startTemplate.Name.Local == "" {
 		return fmt.Errorf("xml: EncodeElement of StartElement with missing name")
 	}
@@ -432,30 +438,30 @@ func (p *printer) marshalValue(val reflect.Value, finfo *fieldInfo, startTemplat
 
 	// Check for marshaler.
 	if val.CanInterface() && typ.Implements(marshalerType) {
-		return p.marshalInterface(val.Interface().(Marshaler), defaultStart(typ, finfo, startTemplate))
+		return enc.marshalInterface(val.Interface().(Marshaler), defaultStart(typ, finfo, startTemplate))
 	}
 	if val.CanAddr() {
 		pv := val.Addr()
 		if pv.CanInterface() && pv.Type().Implements(marshalerType) {
-			return p.marshalInterface(pv.Interface().(Marshaler), defaultStart(pv.Type(), finfo, startTemplate))
+			return enc.marshalInterface(pv.Interface().(Marshaler), defaultStart(pv.Type(), finfo, startTemplate))
 		}
 	}
 
 	// Check for text marshaler.
 	if val.CanInterface() && typ.Implements(textMarshalerType) {
-		return p.marshalTextInterface(val.Interface().(encoding.TextMarshaler), defaultStart(typ, finfo, startTemplate))
+		return enc.marshalTextInterface(val.Interface().(encoding.TextMarshaler), defaultStart(typ, finfo, startTemplate))
 	}
 	if val.CanAddr() {
 		pv := val.Addr()
 		if pv.CanInterface() && pv.Type().Implements(textMarshalerType) {
-			return p.marshalTextInterface(pv.Interface().(encoding.TextMarshaler), defaultStart(pv.Type(), finfo, startTemplate))
+			return enc.marshalTextInterface(pv.Interface().(encoding.TextMarshaler), defaultStart(pv.Type(), finfo, startTemplate))
 		}
 	}
 
 	// Slices and arrays iterate over the elements. They do not have an enclosing tag.
 	if (kind == reflect.Slice || kind == reflect.Array) && typ.Elem().Kind() != reflect.Uint8 {
 		for i, n := 0, val.Len(); i < n; i++ {
-			if err := p.marshalValue(val.Index(i), finfo, startTemplate); err != nil {
+			if err := enc.marshalValue(val.Index(i), finfo, startTemplate); err != nil {
 				return err
 			}
 		}
@@ -517,40 +523,40 @@ func (p *printer) marshalValue(val reflect.Value, finfo *fieldInfo, startTemplat
 		}
 
 		name := Name{Space: finfo.xmlns, Local: finfo.name}
-		if err := p.marshalAttr(&start, name, fv); err != nil {
+		if err := enc.marshalAttr(&start, name, fv); err != nil {
 			return err
 		}
 	}
 
-	if err := p.writeStart(&start); err != nil {
+	if err := enc.writeStart(&start); err != nil {
 		return err
 	}
 
 	if val.Kind() == reflect.Struct {
-		err = p.marshalStruct(tinfo, val)
+		err = enc.marshalStruct(tinfo, val)
 	} else {
-		s, b, err1 := p.marshalSimple(typ, val)
+		s, b, err1 := enc.marshalSimple(typ, val)
 		if err1 != nil {
 			err = err1
 		} else if b != nil {
-			EscapeText(p, b)
+			EscapeText(enc.w, b)
 		} else {
-			p.EscapeString(s)
+			enc.escapeString(s)
 		}
 	}
 	if err != nil {
 		return err
 	}
 
-	if err := p.writeEnd(start.Name); err != nil {
+	if err := enc.writeEnd(start.Name); err != nil {
 		return err
 	}
 
-	return p.cachedWriteError()
+	return enc.cachedWriteError()
 }
 
 // marshalAttr marshals an attribute with the given name and value, adding to start.Attr.
-func (p *printer) marshalAttr(start *StartElement, name Name, val reflect.Value) error {
+func (enc *Encoder) marshalAttr(start *StartElement, name Name, val reflect.Value) error {
 	if val.CanInterface() && val.Type().Implements(marshalerAttrType) {
 		attr, err := val.Interface().(MarshalerAttr).MarshalXMLAttr(name)
 		if err != nil {
@@ -610,7 +616,7 @@ func (p *printer) marshalAttr(start *StartElement, name Name, val reflect.Value)
 	if val.Kind() == reflect.Slice && val.Type().Elem().Kind() != reflect.Uint8 {
 		n := val.Len()
 		for i := 0; i < n; i++ {
-			if err := p.marshalAttr(start, name, val.Index(i)); err != nil {
+			if err := enc.marshalAttr(start, name, val.Index(i)); err != nil {
 				return err
 			}
 		}
@@ -622,7 +628,7 @@ func (p *printer) marshalAttr(start *StartElement, name Name, val reflect.Value)
 		return nil
 	}
 
-	s, b, err := p.marshalSimple(val.Type(), val)
+	s, b, err := enc.marshalSimple(val.Type(), val)
 	if err != nil {
 		return err
 	}
@@ -656,55 +662,55 @@ func defaultStart(typ reflect.Type, finfo *fieldInfo, startTemplate *StartElemen
 }
 
 // marshalInterface marshals a Marshaler interface value.
-func (p *printer) marshalInterface(val Marshaler, start StartElement) error {
+func (enc *Encoder) marshalInterface(val Marshaler, start StartElement) error {
 	// Push a marker onto the tag stack so that MarshalXML
 	// cannot close the XML tags that it did not open.
-	p.tags = append(p.tags, Name{})
-	n := len(p.tags)
+	enc.tags = append(enc.tags, Name{})
+	n := len(enc.tags)
 
-	err := val.MarshalXML(p.encoder, start)
+	err := val.MarshalXML(enc, start)
 	if err != nil {
 		return err
 	}
 
 	// Make sure MarshalXML closed all its tags. p.tags[n-1] is the mark.
-	if len(p.tags) > n {
-		return fmt.Errorf("xml: %s.MarshalXML wrote invalid XML: <%s> not closed", receiverType(val), p.tags[len(p.tags)-1].Local)
+	if len(enc.tags) > n {
+		return fmt.Errorf("xml: %s.MarshalXML wrote invalid XML: <%s> not closed", receiverType(val), enc.tags[len(enc.tags)-1].Local)
 	}
-	p.tags = p.tags[:n-1]
+	enc.tags = enc.tags[:n-1]
 	return nil
 }
 
 // marshalTextInterface marshals a TextMarshaler interface value.
-func (p *printer) marshalTextInterface(val encoding.TextMarshaler, start StartElement) error {
-	if err := p.writeStart(&start); err != nil {
+func (enc *Encoder) marshalTextInterface(val encoding.TextMarshaler, start StartElement) error {
+	if err := enc.writeStart(&start); err != nil {
 		return err
 	}
 	text, err := val.MarshalText()
 	if err != nil {
 		return err
 	}
-	EscapeText(p, text)
-	return p.writeEnd(start.Name)
+	EscapeText(enc.w, text)
+	return enc.writeEnd(start.Name)
 }
 
 // writeStart writes the given start element.
-func (p *printer) writeStart(start *StartElement) error {
+func (enc *Encoder) writeStart(start *StartElement) error {
 	if start.Name.Local == "" {
 		return fmt.Errorf("xml: start tag with no name")
 	}
 
-	p.tags = append(p.tags, start.Name)
-	p.markPrefix()
+	enc.tags = append(enc.tags, start.Name)
+	enc.markPrefix()
 
-	p.writeIndent(1)
-	p.WriteByte('<')
-	p.WriteString(start.Name.Local)
+	enc.writeIndent(1)
+	enc.w.WriteByte('<')
+	enc.w.WriteString(start.Name.Local)
 
 	if start.Name.Space != "" {
-		p.WriteString(` xmlns="`)
-		p.EscapeString(start.Name.Space)
-		p.WriteByte('"')
+		enc.w.WriteString(` xmlns="`)
+		enc.escapeString(start.Name.Space)
+		enc.w.WriteByte('"')
 	}
 
 	// Attributes
@@ -713,45 +719,45 @@ func (p *printer) writeStart(start *StartElement) error {
 		if name.Local == "" {
 			continue
 		}
-		p.WriteByte(' ')
+		enc.w.WriteByte(' ')
 		if name.Space != "" {
-			p.WriteString(p.createAttrPrefix(name.Space))
-			p.WriteByte(':')
+			enc.w.WriteString(enc.createAttrPrefix(name.Space))
+			enc.w.WriteByte(':')
 		}
-		p.WriteString(name.Local)
-		p.WriteString(`="`)
-		p.EscapeString(attr.Value)
-		p.WriteByte('"')
+		enc.w.WriteString(name.Local)
+		enc.w.WriteString(`="`)
+		enc.escapeString(attr.Value)
+		enc.w.WriteByte('"')
 	}
-	p.WriteByte('>')
+	enc.w.WriteByte('>')
 	return nil
 }
 
-func (p *printer) writeEnd(name Name) error {
+func (enc *Encoder) writeEnd(name Name) error {
 	if name.Local == "" {
 		return fmt.Errorf("xml: end tag with no name")
 	}
-	if len(p.tags) == 0 || p.tags[len(p.tags)-1].Local == "" {
+	if len(enc.tags) == 0 || enc.tags[len(enc.tags)-1].Local == "" {
 		return fmt.Errorf("xml: end tag </%s> without start tag", name.Local)
 	}
-	if top := p.tags[len(p.tags)-1]; top != name {
+	if top := enc.tags[len(enc.tags)-1]; top != name {
 		if top.Local != name.Local {
 			return fmt.Errorf("xml: end tag </%s> does not match start tag <%s>", name.Local, top.Local)
 		}
 		return fmt.Errorf("xml: end tag </%s> in namespace %s does not match start tag <%s> in namespace %s", name.Local, name.Space, top.Local, top.Space)
 	}
-	p.tags = p.tags[:len(p.tags)-1]
+	enc.tags = enc.tags[:len(enc.tags)-1]
 
-	p.writeIndent(-1)
-	p.WriteByte('<')
-	p.WriteByte('/')
-	p.WriteString(name.Local)
-	p.WriteByte('>')
-	p.popPrefix()
+	enc.writeIndent(-1)
+	enc.w.WriteByte('<')
+	enc.w.WriteByte('/')
+	enc.w.WriteString(name.Local)
+	enc.w.WriteByte('>')
+	enc.popPrefix()
 	return nil
 }
 
-func (p *printer) marshalSimple(typ reflect.Type, val reflect.Value) (string, []byte, error) {
+func (enc *Encoder) marshalSimple(typ reflect.Type, val reflect.Value) (string, []byte, error) {
 	switch val.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return strconv.FormatInt(val.Int(), 10), nil, nil
@@ -802,8 +808,8 @@ func indirect(vf reflect.Value) reflect.Value {
 	return vf
 }
 
-func (p *printer) marshalStruct(tinfo *typeInfo, val reflect.Value) error {
-	s := parentStack{p: p}
+func (enc *Encoder) marshalStruct(tinfo *typeInfo, val reflect.Value) error {
+	s := parentStack{enc: enc}
 	for i := range tinfo.fields {
 		finfo := &tinfo.fields[i]
 		if finfo.flags&fAttr != 0 {
@@ -830,7 +836,7 @@ func (p *printer) marshalStruct(tinfo *typeInfo, val reflect.Value) error {
 				if err != nil {
 					return err
 				}
-				if err := emit(p, data); err != nil {
+				if err := emit(enc.w, data); err != nil {
 					return err
 				}
 				continue
@@ -842,7 +848,7 @@ func (p *printer) marshalStruct(tinfo *typeInfo, val reflect.Value) error {
 					if err != nil {
 						return err
 					}
-					if err := emit(p, data); err != nil {
+					if err := emit(enc.w, data); err != nil {
 						return err
 					}
 					continue
@@ -853,28 +859,28 @@ func (p *printer) marshalStruct(tinfo *typeInfo, val reflect.Value) error {
 			vf = indirect(vf)
 			switch vf.Kind() {
 			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-				if err := emit(p, strconv.AppendInt(scratch[:0], vf.Int(), 10)); err != nil {
+				if err := emit(enc.w, strconv.AppendInt(scratch[:0], vf.Int(), 10)); err != nil {
 					return err
 				}
 			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-				if err := emit(p, strconv.AppendUint(scratch[:0], vf.Uint(), 10)); err != nil {
+				if err := emit(enc.w, strconv.AppendUint(scratch[:0], vf.Uint(), 10)); err != nil {
 					return err
 				}
 			case reflect.Float32, reflect.Float64:
-				if err := emit(p, strconv.AppendFloat(scratch[:0], vf.Float(), 'g', -1, vf.Type().Bits())); err != nil {
+				if err := emit(enc.w, strconv.AppendFloat(scratch[:0], vf.Float(), 'g', -1, vf.Type().Bits())); err != nil {
 					return err
 				}
 			case reflect.Bool:
-				if err := emit(p, strconv.AppendBool(scratch[:0], vf.Bool())); err != nil {
+				if err := emit(enc.w, strconv.AppendBool(scratch[:0], vf.Bool())); err != nil {
 					return err
 				}
 			case reflect.String:
-				if err := emit(p, []byte(vf.String())); err != nil {
+				if err := emit(enc.w, []byte(vf.String())); err != nil {
 					return err
 				}
 			case reflect.Slice:
 				if elem, ok := vf.Interface().([]byte); ok {
-					if err := emit(p, elem); err != nil {
+					if err := emit(enc.w, elem); err != nil {
 						return err
 					}
 				}
@@ -893,8 +899,8 @@ func (p *printer) marshalStruct(tinfo *typeInfo, val reflect.Value) error {
 			if vf.Len() == 0 {
 				continue
 			}
-			p.writeIndent(0)
-			p.WriteString("<!--")
+			enc.writeIndent(0)
+			enc.w.WriteString("<!--")
 			dashDash := false
 			dashLast := false
 			switch k {
@@ -903,14 +909,14 @@ func (p *printer) marshalStruct(tinfo *typeInfo, val reflect.Value) error {
 				dashDash = strings.Contains(s, "--")
 				dashLast = s[len(s)-1] == '-'
 				if !dashDash {
-					p.WriteString(s)
+					enc.w.WriteString(s)
 				}
 			case reflect.Slice:
 				b := vf.Bytes()
 				dashDash = bytes.Contains(b, ddBytes)
 				dashLast = b[len(b)-1] == '-'
 				if !dashDash {
-					p.Write(b)
+					enc.w.Write(b)
 				}
 			default:
 				panic("can't happen")
@@ -920,9 +926,9 @@ func (p *printer) marshalStruct(tinfo *typeInfo, val reflect.Value) error {
 			}
 			if dashLast {
 				// "--->" is invalid grammar. Make it "- -->"
-				p.WriteByte(' ')
+				enc.w.WriteByte(' ')
 			}
-			p.WriteString("-->")
+			enc.w.WriteString("-->")
 			continue
 
 		case fInnerXML:
@@ -930,10 +936,10 @@ func (p *printer) marshalStruct(tinfo *typeInfo, val reflect.Value) error {
 			iface := vf.Interface()
 			switch raw := iface.(type) {
 			case []byte:
-				p.Write(raw)
+				enc.w.Write(raw)
 				continue
 			case string:
-				p.WriteString(raw)
+				enc.w.WriteString(raw)
 				continue
 			}
 
@@ -949,53 +955,53 @@ func (p *printer) marshalStruct(tinfo *typeInfo, val reflect.Value) error {
 				}
 			}
 		}
-		if err := p.marshalValue(vf, finfo, nil); err != nil {
+		if err := enc.marshalValue(vf, finfo, nil); err != nil {
 			return err
 		}
 	}
 	s.trim(nil)
-	return p.cachedWriteError()
+	return enc.cachedWriteError()
 }
 
 // return the bufio Writer's cached write error
-func (p *printer) cachedWriteError() error {
-	_, err := p.Write(nil)
+func (enc *Encoder) cachedWriteError() error {
+	_, err := enc.w.Write(nil)
 	return err
 }
 
-func (p *printer) writeIndent(depthDelta int) {
-	if len(p.prefix) == 0 && len(p.indent) == 0 {
+func (enc *Encoder) writeIndent(depthDelta int) {
+	if len(enc.prefix) == 0 && len(enc.indent) == 0 {
 		return
 	}
 	if depthDelta < 0 {
-		p.depth--
-		if p.indentedIn {
-			p.indentedIn = false
+		enc.depth--
+		if enc.indentedIn {
+			enc.indentedIn = false
 			return
 		}
-		p.indentedIn = false
+		enc.indentedIn = false
 	}
-	if p.putNewline {
-		p.WriteByte('\n')
+	if enc.putNewline {
+		enc.w.WriteByte('\n')
 	} else {
-		p.putNewline = true
+		enc.putNewline = true
 	}
-	if len(p.prefix) > 0 {
-		p.WriteString(p.prefix)
+	if len(enc.prefix) > 0 {
+		enc.w.WriteString(enc.prefix)
 	}
-	if len(p.indent) > 0 {
-		for i := 0; i < p.depth; i++ {
-			p.WriteString(p.indent)
+	if len(enc.indent) > 0 {
+		for i := 0; i < enc.depth; i++ {
+			enc.w.WriteString(enc.indent)
 		}
 	}
 	if depthDelta > 0 {
-		p.depth++
-		p.indentedIn = true
+		enc.depth++
+		enc.indentedIn = true
 	}
 }
 
 type parentStack struct {
-	p     *printer
+	enc   *Encoder
 	stack []string
 }
 
@@ -1010,7 +1016,7 @@ func (s *parentStack) trim(parents []string) error {
 		}
 	}
 	for i := len(s.stack) - 1; i >= split; i-- {
-		if err := s.p.writeEnd(Name{Local: s.stack[i]}); err != nil {
+		if err := s.enc.writeEnd(Name{Local: s.stack[i]}); err != nil {
 			return err
 		}
 	}
@@ -1021,7 +1027,7 @@ func (s *parentStack) trim(parents []string) error {
 // push adds parent elements to the stack and writes open tags.
 func (s *parentStack) push(parents []string) error {
 	for i := 0; i < len(parents); i++ {
-		if err := s.p.writeStart(&StartElement{Name: Name{Local: parents[i]}}); err != nil {
+		if err := s.enc.writeStart(&StartElement{Name: Name{Local: parents[i]}}); err != nil {
 			return err
 		}
 	}
