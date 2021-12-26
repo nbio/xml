@@ -92,6 +92,14 @@ func makeCopy(b []byte) []byte {
 // Copy creates a new copy of CharData.
 func (c CharData) Copy() CharData { return CharData(makeCopy(c)) }
 
+// A CDATA represents XML character data (raw text),
+// encoded in a <![CDATA[ section.
+// Note: CDATA is only used for encoding. A Decoder will emit CDATA Tokens as CharData.
+type CDATA []byte
+
+// Copy creates a new copy of CDATA.
+func (c CDATA) Copy() CDATA { return CDATA(makeCopy(c)) }
+
 // A Comment represents an XML comment of the form <!--comment-->.
 // The bytes do not include the <!-- and --> comment markers.
 type Comment []byte
@@ -118,9 +126,17 @@ type Directive []byte
 // Copy creates a new copy of Directive.
 func (d Directive) Copy() Directive { return Directive(makeCopy(d)) }
 
+// An InnerXML represents raw unescaped XML.
+type InnerXML []byte
+
+// Copy creates a new copy of InnerXML.
+func (x InnerXML) Copy() InnerXML { return InnerXML(makeCopy(x)) }
+
 // CopyToken returns a copy of a Token.
 func CopyToken(t Token) Token {
 	switch v := t.(type) {
+	case CDATA:
+		return v.Copy()
 	case CharData:
 		return v.Copy()
 	case Comment:
@@ -130,6 +146,8 @@ func CopyToken(t Token) Token {
 	case ProcInst:
 		return v.Copy()
 	case StartElement:
+		return v.Copy()
+	case InnerXML:
 		return v.Copy()
 	}
 	return t

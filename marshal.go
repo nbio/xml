@@ -134,22 +134,37 @@ func MarshalIndent(v interface{}, prefix, indent string) ([]byte, error) {
 
 // An Encoder writes XML data to an output stream.
 type Encoder struct {
-	p printer
+	e TokenEncoder
 }
 
 // NewEncoder returns a new encoder that writes to w.
 func NewEncoder(w io.Writer) *Encoder {
-	e := &Encoder{printer{Writer: bufio.NewWriter(w)}}
-	e.p.encoder = e
+	e := &Encoder{newPrinter(w)}
 	return e
+}
+
+// A TokenEncoder writes raw XML tokens.
+// Encoder is an implementation of TokenEncoder.
+type TokenEncoder interface {
+	EncodeToken(t Token) error
+}
+
+// NewTokenEncoder returns a new encoder that uses e to encode XML tokens.
+func NewTokenEncoder(e TokenEncoder) *Encoder {
+	return &Encoder{e}
 }
 
 // Indent sets the encoder to generate XML in which each element
 // begins on a new indented line that starts with prefix and is followed by
 // one or more copies of indent according to the nesting depth.
 func (enc *Encoder) Indent(prefix, indent string) {
-	enc.p.prefix = prefix
-	enc.p.indent = indent
+	if i, ok := enc.e.(indenter); ok {
+		i.Indent(prefix, indent)
+	}
+}
+
+type indenter interface {
+	Indent(prefix, indent string)
 }
 
 // Encode writes the XML encoding of v to the stream.
@@ -159,11 +174,11 @@ func (enc *Encoder) Indent(prefix, indent string) {
 //
 // Encode calls Flush before returning.
 func (enc *Encoder) Encode(v interface{}) error {
-	err := enc.p.marshalValue(reflect.ValueOf(v), nil, nil)
+	err := enc.marshalValue(reflect.ValueOf(v), nil, nil)
 	if err != nil {
 		return err
 	}
-	return enc.p.Flush()
+	return enc.Flush()
 }
 
 // EncodeElement writes the XML encoding of v to the stream,
@@ -174,11 +189,11 @@ func (enc *Encoder) Encode(v interface{}) error {
 //
 // EncodeElement calls Flush before returning.
 func (enc *Encoder) EncodeElement(v interface{}, start StartElement) error {
-	err := enc.p.marshalValue(reflect.ValueOf(v), nil, &start)
+	err := enc.marshalValue(reflect.ValueOf(v), nil, &start)
 	if err != nil {
 		return err
 	}
-	return enc.p.Flush()
+	return enc.Flush()
 }
 
 var (
@@ -200,8 +215,544 @@ var (
 // EncodeToken allows writing a ProcInst with Target set to "xml" only as the first token
 // in the stream.
 func (enc *Encoder) EncodeToken(t Token) error {
+	return enc.e.EncodeToken(t)
+}
 
-	p := &enc.p
+// Flush flushes any buffered XML to the underlying writer.
+// See the EncodeToken documentation for details about when it is necessary.
+func (enc *Encoder) Flush() error {
+	if f, ok := enc.e.(flusher); ok {
+		return f.Flush()
+	}
+	return nil
+}
+
+type flusher interface {
+	Flush() error
+}
+
+// ----------------------------------------------------------------------------
+
+var (
+	marshalerType     = reflect.TypeOf((*Marshaler)(nil)).Elem()
+	marshalerAttrType = reflect.TypeOf((*MarshalerAttr)(nil)).Elem()
+	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
+)
+
+// marshalValue writes one or more XML elements representing val.
+// If val was obtained from a struct field, finfo must have its details.
+func (enc *Encoder) marshalValue(val reflect.Value, finfo *fieldInfo, startTemplate *StartElement) error {
+	if startTemplate != nil && startTemplate.Name.Local == "" {
+		return fmt.Errorf("xml: EncodeElement of StartElement with missing name")
+	}
+
+	if !val.IsValid() {
+		return nil
+	}
+	if finfo != nil && finfo.flags&fOmitEmpty != 0 && isEmptyValue(val) {
+		return nil
+	}
+
+	// Drill into interfaces and pointers.
+	// This can turn into an infinite loop given a cyclic chain,
+	// but it matches the Go 1 behavior.
+	for val.Kind() == reflect.Interface || val.Kind() == reflect.Ptr {
+		if val.IsNil() {
+			return nil
+		}
+		val = val.Elem()
+	}
+
+	kind := val.Kind()
+	typ := val.Type()
+
+	// Check for marshaler.
+	if val.CanInterface() && typ.Implements(marshalerType) {
+		return enc.marshalInterface(val.Interface().(Marshaler), defaultStart(typ, finfo, startTemplate))
+	}
+	if val.CanAddr() {
+		pv := val.Addr()
+		if pv.CanInterface() && pv.Type().Implements(marshalerType) {
+			return enc.marshalInterface(pv.Interface().(Marshaler), defaultStart(pv.Type(), finfo, startTemplate))
+		}
+	}
+
+	// Check for text marshaler.
+	if val.CanInterface() && typ.Implements(textMarshalerType) {
+		return enc.marshalTextInterface(val.Interface().(encoding.TextMarshaler), defaultStart(typ, finfo, startTemplate))
+	}
+	if val.CanAddr() {
+		pv := val.Addr()
+		if pv.CanInterface() && pv.Type().Implements(textMarshalerType) {
+			return enc.marshalTextInterface(pv.Interface().(encoding.TextMarshaler), defaultStart(pv.Type(), finfo, startTemplate))
+		}
+	}
+
+	// Slices and arrays iterate over the elements. They do not have an enclosing tag.
+	if (kind == reflect.Slice || kind == reflect.Array) && typ.Elem().Kind() != reflect.Uint8 {
+		for i, n := 0, val.Len(); i < n; i++ {
+			if err := enc.marshalValue(val.Index(i), finfo, startTemplate); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	tinfo, err := getTypeInfo(typ)
+	if err != nil {
+		return err
+	}
+
+	// Create start element.
+	// Precedence for the XML element name is:
+	// 0. startTemplate
+	// 1. XMLName field in underlying struct;
+	// 2. field name/tag in the struct field; and
+	// 3. type name
+	var start StartElement
+
+	if startTemplate != nil {
+		start.Name = startTemplate.Name
+		start.Attr = append(start.Attr, startTemplate.Attr...)
+	} else if tinfo.xmlname != nil {
+		xmlname := tinfo.xmlname
+		if xmlname.name != "" {
+			start.Name.Space, start.Name.Local = xmlname.xmlns, xmlname.name
+		} else {
+			fv := xmlname.value(val, dontInitNilPointers)
+			if v, ok := fv.Interface().(Name); ok && v.Local != "" {
+				start.Name = v
+			}
+		}
+	}
+	if start.Name.Local == "" && finfo != nil {
+		start.Name.Space, start.Name.Local = finfo.xmlns, finfo.name
+	}
+	if start.Name.Local == "" {
+		name := typ.Name()
+		if name == "" {
+			return &UnsupportedTypeError{typ}
+		}
+		start.Name.Local = name
+	}
+
+	// Attributes
+	for i := range tinfo.fields {
+		finfo := &tinfo.fields[i]
+		if finfo.flags&fAttr == 0 {
+			continue
+		}
+		fv := finfo.value(val, dontInitNilPointers)
+
+		if finfo.flags&fOmitEmpty != 0 && isEmptyValue(fv) {
+			continue
+		}
+
+		if fv.Kind() == reflect.Interface && fv.IsNil() {
+			continue
+		}
+
+		name := Name{Space: finfo.xmlns, Local: finfo.name}
+		if err := enc.marshalAttr(&start, name, fv); err != nil {
+			return err
+		}
+	}
+
+	if err := enc.e.EncodeToken(start); err != nil {
+		return err
+	}
+
+	if val.Kind() == reflect.Struct {
+		err = enc.marshalStruct(tinfo, val)
+	} else {
+		s, b, err1 := enc.marshalSimple(typ, val)
+		if err1 != nil {
+			err = err1
+		} else if b != nil {
+			enc.e.EncodeToken(CharData(b))
+		} else {
+			enc.e.EncodeToken(CharData(s))
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	return enc.e.EncodeToken(EndElement{start.Name})
+}
+
+// marshalAttr marshals an attribute with the given name and value, adding to start.Attr.
+func (enc *Encoder) marshalAttr(start *StartElement, name Name, val reflect.Value) error {
+	if val.CanInterface() && val.Type().Implements(marshalerAttrType) {
+		attr, err := val.Interface().(MarshalerAttr).MarshalXMLAttr(name)
+		if err != nil {
+			return err
+		}
+		if attr.Name.Local != "" {
+			start.Attr = append(start.Attr, attr)
+		}
+		return nil
+	}
+
+	if val.CanAddr() {
+		pv := val.Addr()
+		if pv.CanInterface() && pv.Type().Implements(marshalerAttrType) {
+			attr, err := pv.Interface().(MarshalerAttr).MarshalXMLAttr(name)
+			if err != nil {
+				return err
+			}
+			if attr.Name.Local != "" {
+				start.Attr = append(start.Attr, attr)
+			}
+			return nil
+		}
+	}
+
+	if val.CanInterface() && val.Type().Implements(textMarshalerType) {
+		text, err := val.Interface().(encoding.TextMarshaler).MarshalText()
+		if err != nil {
+			return err
+		}
+		start.Attr = append(start.Attr, Attr{name, string(text)})
+		return nil
+	}
+
+	if val.CanAddr() {
+		pv := val.Addr()
+		if pv.CanInterface() && pv.Type().Implements(textMarshalerType) {
+			text, err := pv.Interface().(encoding.TextMarshaler).MarshalText()
+			if err != nil {
+				return err
+			}
+			start.Attr = append(start.Attr, Attr{name, string(text)})
+			return nil
+		}
+	}
+
+	// Dereference or skip nil pointer, interface values.
+	switch val.Kind() {
+	case reflect.Ptr, reflect.Interface:
+		if val.IsNil() {
+			return nil
+		}
+		val = val.Elem()
+	}
+
+	// Walk slices.
+	if val.Kind() == reflect.Slice && val.Type().Elem().Kind() != reflect.Uint8 {
+		n := val.Len()
+		for i := 0; i < n; i++ {
+			if err := enc.marshalAttr(start, name, val.Index(i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if val.Type() == attrType {
+		start.Attr = append(start.Attr, val.Interface().(Attr))
+		return nil
+	}
+
+	s, b, err := enc.marshalSimple(val.Type(), val)
+	if err != nil {
+		return err
+	}
+	if b != nil {
+		s = string(b)
+	}
+	start.Attr = append(start.Attr, Attr{name, s})
+	return nil
+}
+
+// defaultStart returns the default start element to use,
+// given the reflect type, field info, and start template.
+func defaultStart(typ reflect.Type, finfo *fieldInfo, startTemplate *StartElement) StartElement {
+	var start StartElement
+	// Precedence for the XML element name is as above,
+	// except that we do not look inside structs for the first field.
+	if startTemplate != nil {
+		start.Name = startTemplate.Name
+		start.Attr = append(start.Attr, startTemplate.Attr...)
+	} else if finfo != nil && finfo.name != "" {
+		start.Name.Local = finfo.name
+		start.Name.Space = finfo.xmlns
+	} else if typ.Name() != "" {
+		start.Name.Local = typ.Name()
+	} else {
+		// Must be a pointer to a named type,
+		// since it has the Marshaler methods.
+		start.Name.Local = typ.Elem().Name()
+	}
+	return start
+}
+
+// marshalInterface marshals a Marshaler interface value.
+func (enc *Encoder) marshalInterface(val Marshaler, start StartElement) error {
+	// Push a marker onto the tag stack so that MarshalXML
+	// cannot close the XML tags that it did not open.
+	// TODO(ydnar): make this work
+	// enc.tags = append(enc.tags, Name{})
+	// n := len(enc.tags)
+
+	err := val.MarshalXML(enc, start)
+	if err != nil {
+		return err
+	}
+
+	// Make sure MarshalXML closed all its tags. p.tags[n-1] is the mark.
+	// TODO(ydnar): make this work
+	// if len(enc.tags) > n {
+	// 	return fmt.Errorf("xml: %s.MarshalXML wrote invalid XML: <%s> not closed", receiverType(val), enc.tags[len(enc.tags)-1].Local)
+	// }
+	// enc.tags = enc.tags[:n-1]
+	return nil
+}
+
+// marshalTextInterface marshals a TextMarshaler interface value.
+func (enc *Encoder) marshalTextInterface(val encoding.TextMarshaler, start StartElement) error {
+	if err := enc.e.EncodeToken(start); err != nil {
+		return err
+	}
+	text, err := val.MarshalText()
+	if err != nil {
+		return err
+	}
+	err = enc.e.EncodeToken(CharData(text))
+	if err != nil {
+		return err
+	}
+	return enc.e.EncodeToken(EndElement{start.Name})
+}
+
+func (enc *Encoder) marshalSimple(typ reflect.Type, val reflect.Value) (string, []byte, error) {
+	switch val.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return strconv.FormatInt(val.Int(), 10), nil, nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return strconv.FormatUint(val.Uint(), 10), nil, nil
+	case reflect.Float32, reflect.Float64:
+		return strconv.FormatFloat(val.Float(), 'g', -1, val.Type().Bits()), nil, nil
+	case reflect.String:
+		return val.String(), nil, nil
+	case reflect.Bool:
+		return strconv.FormatBool(val.Bool()), nil, nil
+	case reflect.Array:
+		if typ.Elem().Kind() != reflect.Uint8 {
+			break
+		}
+		// [...]byte
+		var bytes []byte
+		if val.CanAddr() {
+			bytes = val.Slice(0, val.Len()).Bytes()
+		} else {
+			bytes = make([]byte, val.Len())
+			reflect.Copy(reflect.ValueOf(bytes), val)
+		}
+		return "", bytes, nil
+	case reflect.Slice:
+		if typ.Elem().Kind() != reflect.Uint8 {
+			break
+		}
+		// []byte
+		return "", val.Bytes(), nil
+	}
+	return "", nil, &UnsupportedTypeError{typ}
+}
+
+var ddBytes = []byte("--")
+
+// indirect drills into interfaces and pointers, returning the pointed-at value.
+// If it encounters a nil interface or pointer, indirect returns that nil value.
+// This can turn into an infinite loop given a cyclic chain,
+// but it matches the Go 1 behavior.
+func indirect(vf reflect.Value) reflect.Value {
+	for vf.Kind() == reflect.Interface || vf.Kind() == reflect.Ptr {
+		if vf.IsNil() {
+			return vf
+		}
+		vf = vf.Elem()
+	}
+	return vf
+}
+
+func (enc *Encoder) marshalStruct(tinfo *typeInfo, val reflect.Value) error {
+	s := parentStack{e: enc}
+	for i := range tinfo.fields {
+		finfo := &tinfo.fields[i]
+		if finfo.flags&fAttr != 0 {
+			continue
+		}
+		vf := finfo.value(val, dontInitNilPointers)
+		if !vf.IsValid() {
+			// The field is behind an anonymous struct field that's
+			// nil. Skip it.
+			continue
+		}
+
+		switch finfo.flags & fMode {
+		case fCDATA, fCharData:
+			emit := func(b []byte) error {
+				return enc.EncodeToken(CharData(b))
+			}
+			if finfo.flags&fMode == fCDATA {
+				emit = func(b []byte) error {
+					return enc.EncodeToken(CDATA(b))
+				}
+			}
+			if err := s.trim(finfo.parents); err != nil {
+				return err
+			}
+			if vf.CanInterface() && vf.Type().Implements(textMarshalerType) {
+				data, err := vf.Interface().(encoding.TextMarshaler).MarshalText()
+				if err != nil {
+					return err
+				}
+				if err := emit(data); err != nil {
+					return err
+				}
+				continue
+			}
+			if vf.CanAddr() {
+				pv := vf.Addr()
+				if pv.CanInterface() && pv.Type().Implements(textMarshalerType) {
+					data, err := pv.Interface().(encoding.TextMarshaler).MarshalText()
+					if err != nil {
+						return err
+					}
+					if err := emit(data); err != nil {
+						return err
+					}
+					continue
+				}
+			}
+
+			var scratch [64]byte
+			vf = indirect(vf)
+			switch vf.Kind() {
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				if err := emit(strconv.AppendInt(scratch[:0], vf.Int(), 10)); err != nil {
+					return err
+				}
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+				if err := emit(strconv.AppendUint(scratch[:0], vf.Uint(), 10)); err != nil {
+					return err
+				}
+			case reflect.Float32, reflect.Float64:
+				if err := emit(strconv.AppendFloat(scratch[:0], vf.Float(), 'g', -1, vf.Type().Bits())); err != nil {
+					return err
+				}
+			case reflect.Bool:
+				if err := emit(strconv.AppendBool(scratch[:0], vf.Bool())); err != nil {
+					return err
+				}
+			case reflect.String:
+				if err := emit([]byte(vf.String())); err != nil {
+					return err
+				}
+			case reflect.Slice:
+				if elem, ok := vf.Interface().([]byte); ok {
+					if err := emit(elem); err != nil {
+						return err
+					}
+				}
+			}
+			continue
+
+		case fComment:
+			if err := s.trim(finfo.parents); err != nil {
+				return err
+			}
+			vf = indirect(vf)
+			k := vf.Kind()
+			if !(k == reflect.String || k == reflect.Slice && vf.Type().Elem().Kind() == reflect.Uint8) {
+				return fmt.Errorf("xml: bad type for comment field of %s", val.Type())
+			}
+			if vf.Len() == 0 {
+				continue
+			}
+			var c Comment
+			switch k {
+			case reflect.String:
+				c = Comment(vf.String())
+			case reflect.Slice:
+				c = Comment(vf.Bytes())
+			default:
+				panic("can't happen")
+			}
+			if bytes.Contains(c, ddBytes) {
+				return fmt.Errorf(`xml: comments must not contain "--"`)
+			}
+			if c[len(c)-1] == '-' {
+				// "--->" is invalid grammar. Make it "- -->"
+				c = append(c, ' ')
+			}
+			enc.EncodeToken(c)
+			continue
+
+		case fInnerXML:
+			vf = indirect(vf)
+			iface := vf.Interface()
+			switch raw := iface.(type) {
+			case []byte:
+				enc.EncodeToken(InnerXML(raw))
+				continue
+			case string:
+				enc.EncodeToken(InnerXML(raw))
+				continue
+			}
+
+		case fElement, fElement | fAny:
+			if err := s.trim(finfo.parents); err != nil {
+				return err
+			}
+			if len(finfo.parents) > len(s.stack) {
+				if vf.Kind() != reflect.Ptr && vf.Kind() != reflect.Interface || !vf.IsNil() {
+					if err := s.push(finfo.parents[len(s.stack):]); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		if err := enc.marshalValue(vf, finfo, nil); err != nil {
+			return err
+		}
+	}
+	s.trim(nil)
+	return nil // FIXME: enc.cachedWriteError()
+}
+
+// ----------------------------------------------------------------------------
+
+type printer struct {
+	*bufio.Writer
+	encoder    *Encoder
+	seq        int
+	indent     string
+	prefix     string
+	depth      int
+	indentedIn bool
+	putNewline bool
+	attrNS     map[string]string // map prefix -> name space
+	attrPrefix map[string]string // map name space -> prefix
+	prefixes   []string
+	tags       []Name
+}
+
+func newPrinter(w io.Writer) *printer {
+	return &printer{Writer: bufio.NewWriter(w)}
+}
+
+// Indent implements the indenter interface.
+// See (*Encoder).Indent for more information.
+func (p *printer) Indent(prefix, indent string) {
+	p.prefix = prefix
+	p.indent = indent
+}
+
+// EncodeToken implements the TokenEncoder interface.
+// See (*Encoder).EncodeToken for more information.
+func (p *printer) EncodeToken(t Token) error {
 	switch t := t.(type) {
 	case StartElement:
 		if err := p.writeStart(&t); err != nil {
@@ -213,6 +764,8 @@ func (enc *Encoder) EncodeToken(t Token) error {
 		}
 	case CharData:
 		escapeText(p, t, false)
+	case CDATA:
+		emitCDATA(p, t)
 	case Comment:
 		if bytes.Contains(t, endComment) {
 			return fmt.Errorf("xml: EncodeToken of Comment containing --> marker")
@@ -247,8 +800,10 @@ func (enc *Encoder) EncodeToken(t Token) error {
 		p.WriteString("<!")
 		p.Write(t)
 		p.WriteString(">")
+	case InnerXML:
+		p.Write(t)
 	default:
-		return fmt.Errorf("xml: EncodeToken of invalid token type")
+		return fmt.Errorf("xml: EncodeToken of invalid token type: %#v", t)
 
 	}
 	return p.cachedWriteError()
@@ -292,27 +847,6 @@ func isValidDirective(dir Directive) bool {
 		}
 	}
 	return depth == 0 && inquote == 0 && !incomment
-}
-
-// Flush flushes any buffered XML to the underlying writer.
-// See the EncodeToken documentation for details about when it is necessary.
-func (enc *Encoder) Flush() error {
-	return enc.p.Flush()
-}
-
-type printer struct {
-	*bufio.Writer
-	encoder    *Encoder
-	seq        int
-	indent     string
-	prefix     string
-	depth      int
-	indentedIn bool
-	putNewline bool
-	attrNS     map[string]string // map prefix -> name space
-	attrPrefix map[string]string // map name space -> prefix
-	prefixes   []string
-	tags       []Name
 }
 
 // createAttrPrefix finds the name space prefix attribute to use for the given name space,
@@ -397,297 +931,6 @@ func (p *printer) popPrefix() {
 	}
 }
 
-var (
-	marshalerType     = reflect.TypeOf((*Marshaler)(nil)).Elem()
-	marshalerAttrType = reflect.TypeOf((*MarshalerAttr)(nil)).Elem()
-	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
-)
-
-// marshalValue writes one or more XML elements representing val.
-// If val was obtained from a struct field, finfo must have its details.
-func (p *printer) marshalValue(val reflect.Value, finfo *fieldInfo, startTemplate *StartElement) error {
-	if startTemplate != nil && startTemplate.Name.Local == "" {
-		return fmt.Errorf("xml: EncodeElement of StartElement with missing name")
-	}
-
-	if !val.IsValid() {
-		return nil
-	}
-	if finfo != nil && finfo.flags&fOmitEmpty != 0 && isEmptyValue(val) {
-		return nil
-	}
-
-	// Drill into interfaces and pointers.
-	// This can turn into an infinite loop given a cyclic chain,
-	// but it matches the Go 1 behavior.
-	for val.Kind() == reflect.Interface || val.Kind() == reflect.Ptr {
-		if val.IsNil() {
-			return nil
-		}
-		val = val.Elem()
-	}
-
-	kind := val.Kind()
-	typ := val.Type()
-
-	// Check for marshaler.
-	if val.CanInterface() && typ.Implements(marshalerType) {
-		return p.marshalInterface(val.Interface().(Marshaler), defaultStart(typ, finfo, startTemplate))
-	}
-	if val.CanAddr() {
-		pv := val.Addr()
-		if pv.CanInterface() && pv.Type().Implements(marshalerType) {
-			return p.marshalInterface(pv.Interface().(Marshaler), defaultStart(pv.Type(), finfo, startTemplate))
-		}
-	}
-
-	// Check for text marshaler.
-	if val.CanInterface() && typ.Implements(textMarshalerType) {
-		return p.marshalTextInterface(val.Interface().(encoding.TextMarshaler), defaultStart(typ, finfo, startTemplate))
-	}
-	if val.CanAddr() {
-		pv := val.Addr()
-		if pv.CanInterface() && pv.Type().Implements(textMarshalerType) {
-			return p.marshalTextInterface(pv.Interface().(encoding.TextMarshaler), defaultStart(pv.Type(), finfo, startTemplate))
-		}
-	}
-
-	// Slices and arrays iterate over the elements. They do not have an enclosing tag.
-	if (kind == reflect.Slice || kind == reflect.Array) && typ.Elem().Kind() != reflect.Uint8 {
-		for i, n := 0, val.Len(); i < n; i++ {
-			if err := p.marshalValue(val.Index(i), finfo, startTemplate); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	tinfo, err := getTypeInfo(typ)
-	if err != nil {
-		return err
-	}
-
-	// Create start element.
-	// Precedence for the XML element name is:
-	// 0. startTemplate
-	// 1. XMLName field in underlying struct;
-	// 2. field name/tag in the struct field; and
-	// 3. type name
-	var start StartElement
-
-	if startTemplate != nil {
-		start.Name = startTemplate.Name
-		start.Attr = append(start.Attr, startTemplate.Attr...)
-	} else if tinfo.xmlname != nil {
-		xmlname := tinfo.xmlname
-		if xmlname.name != "" {
-			start.Name.Space, start.Name.Local = xmlname.xmlns, xmlname.name
-		} else {
-			fv := xmlname.value(val, dontInitNilPointers)
-			if v, ok := fv.Interface().(Name); ok && v.Local != "" {
-				start.Name = v
-			}
-		}
-	}
-	if start.Name.Local == "" && finfo != nil {
-		start.Name.Space, start.Name.Local = finfo.xmlns, finfo.name
-	}
-	if start.Name.Local == "" {
-		name := typ.Name()
-		if name == "" {
-			return &UnsupportedTypeError{typ}
-		}
-		start.Name.Local = name
-	}
-
-	// Attributes
-	for i := range tinfo.fields {
-		finfo := &tinfo.fields[i]
-		if finfo.flags&fAttr == 0 {
-			continue
-		}
-		fv := finfo.value(val, dontInitNilPointers)
-
-		if finfo.flags&fOmitEmpty != 0 && isEmptyValue(fv) {
-			continue
-		}
-
-		if fv.Kind() == reflect.Interface && fv.IsNil() {
-			continue
-		}
-
-		name := Name{Space: finfo.xmlns, Local: finfo.name}
-		if err := p.marshalAttr(&start, name, fv); err != nil {
-			return err
-		}
-	}
-
-	if err := p.writeStart(&start); err != nil {
-		return err
-	}
-
-	if val.Kind() == reflect.Struct {
-		err = p.marshalStruct(tinfo, val)
-	} else {
-		s, b, err1 := p.marshalSimple(typ, val)
-		if err1 != nil {
-			err = err1
-		} else if b != nil {
-			EscapeText(p, b)
-		} else {
-			p.EscapeString(s)
-		}
-	}
-	if err != nil {
-		return err
-	}
-
-	if err := p.writeEnd(start.Name); err != nil {
-		return err
-	}
-
-	return p.cachedWriteError()
-}
-
-// marshalAttr marshals an attribute with the given name and value, adding to start.Attr.
-func (p *printer) marshalAttr(start *StartElement, name Name, val reflect.Value) error {
-	if val.CanInterface() && val.Type().Implements(marshalerAttrType) {
-		attr, err := val.Interface().(MarshalerAttr).MarshalXMLAttr(name)
-		if err != nil {
-			return err
-		}
-		if attr.Name.Local != "" {
-			start.Attr = append(start.Attr, attr)
-		}
-		return nil
-	}
-
-	if val.CanAddr() {
-		pv := val.Addr()
-		if pv.CanInterface() && pv.Type().Implements(marshalerAttrType) {
-			attr, err := pv.Interface().(MarshalerAttr).MarshalXMLAttr(name)
-			if err != nil {
-				return err
-			}
-			if attr.Name.Local != "" {
-				start.Attr = append(start.Attr, attr)
-			}
-			return nil
-		}
-	}
-
-	if val.CanInterface() && val.Type().Implements(textMarshalerType) {
-		text, err := val.Interface().(encoding.TextMarshaler).MarshalText()
-		if err != nil {
-			return err
-		}
-		start.Attr = append(start.Attr, Attr{name, string(text)})
-		return nil
-	}
-
-	if val.CanAddr() {
-		pv := val.Addr()
-		if pv.CanInterface() && pv.Type().Implements(textMarshalerType) {
-			text, err := pv.Interface().(encoding.TextMarshaler).MarshalText()
-			if err != nil {
-				return err
-			}
-			start.Attr = append(start.Attr, Attr{name, string(text)})
-			return nil
-		}
-	}
-
-	// Dereference or skip nil pointer, interface values.
-	switch val.Kind() {
-	case reflect.Ptr, reflect.Interface:
-		if val.IsNil() {
-			return nil
-		}
-		val = val.Elem()
-	}
-
-	// Walk slices.
-	if val.Kind() == reflect.Slice && val.Type().Elem().Kind() != reflect.Uint8 {
-		n := val.Len()
-		for i := 0; i < n; i++ {
-			if err := p.marshalAttr(start, name, val.Index(i)); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	if val.Type() == attrType {
-		start.Attr = append(start.Attr, val.Interface().(Attr))
-		return nil
-	}
-
-	s, b, err := p.marshalSimple(val.Type(), val)
-	if err != nil {
-		return err
-	}
-	if b != nil {
-		s = string(b)
-	}
-	start.Attr = append(start.Attr, Attr{name, s})
-	return nil
-}
-
-// defaultStart returns the default start element to use,
-// given the reflect type, field info, and start template.
-func defaultStart(typ reflect.Type, finfo *fieldInfo, startTemplate *StartElement) StartElement {
-	var start StartElement
-	// Precedence for the XML element name is as above,
-	// except that we do not look inside structs for the first field.
-	if startTemplate != nil {
-		start.Name = startTemplate.Name
-		start.Attr = append(start.Attr, startTemplate.Attr...)
-	} else if finfo != nil && finfo.name != "" {
-		start.Name.Local = finfo.name
-		start.Name.Space = finfo.xmlns
-	} else if typ.Name() != "" {
-		start.Name.Local = typ.Name()
-	} else {
-		// Must be a pointer to a named type,
-		// since it has the Marshaler methods.
-		start.Name.Local = typ.Elem().Name()
-	}
-	return start
-}
-
-// marshalInterface marshals a Marshaler interface value.
-func (p *printer) marshalInterface(val Marshaler, start StartElement) error {
-	// Push a marker onto the tag stack so that MarshalXML
-	// cannot close the XML tags that it did not open.
-	p.tags = append(p.tags, Name{})
-	n := len(p.tags)
-
-	err := val.MarshalXML(p.encoder, start)
-	if err != nil {
-		return err
-	}
-
-	// Make sure MarshalXML closed all its tags. p.tags[n-1] is the mark.
-	if len(p.tags) > n {
-		return fmt.Errorf("xml: %s.MarshalXML wrote invalid XML: <%s> not closed", receiverType(val), p.tags[len(p.tags)-1].Local)
-	}
-	p.tags = p.tags[:n-1]
-	return nil
-}
-
-// marshalTextInterface marshals a TextMarshaler interface value.
-func (p *printer) marshalTextInterface(val encoding.TextMarshaler, start StartElement) error {
-	if err := p.writeStart(&start); err != nil {
-		return err
-	}
-	text, err := val.MarshalText()
-	if err != nil {
-		return err
-	}
-	EscapeText(p, text)
-	return p.writeEnd(start.Name)
-}
-
 // writeStart writes the given start element.
 func (p *printer) writeStart(start *StartElement) error {
 	if start.Name.Local == "" {
@@ -751,212 +994,6 @@ func (p *printer) writeEnd(name Name) error {
 	return nil
 }
 
-func (p *printer) marshalSimple(typ reflect.Type, val reflect.Value) (string, []byte, error) {
-	switch val.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return strconv.FormatInt(val.Int(), 10), nil, nil
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		return strconv.FormatUint(val.Uint(), 10), nil, nil
-	case reflect.Float32, reflect.Float64:
-		return strconv.FormatFloat(val.Float(), 'g', -1, val.Type().Bits()), nil, nil
-	case reflect.String:
-		return val.String(), nil, nil
-	case reflect.Bool:
-		return strconv.FormatBool(val.Bool()), nil, nil
-	case reflect.Array:
-		if typ.Elem().Kind() != reflect.Uint8 {
-			break
-		}
-		// [...]byte
-		var bytes []byte
-		if val.CanAddr() {
-			bytes = val.Slice(0, val.Len()).Bytes()
-		} else {
-			bytes = make([]byte, val.Len())
-			reflect.Copy(reflect.ValueOf(bytes), val)
-		}
-		return "", bytes, nil
-	case reflect.Slice:
-		if typ.Elem().Kind() != reflect.Uint8 {
-			break
-		}
-		// []byte
-		return "", val.Bytes(), nil
-	}
-	return "", nil, &UnsupportedTypeError{typ}
-}
-
-var ddBytes = []byte("--")
-
-// indirect drills into interfaces and pointers, returning the pointed-at value.
-// If it encounters a nil interface or pointer, indirect returns that nil value.
-// This can turn into an infinite loop given a cyclic chain,
-// but it matches the Go 1 behavior.
-func indirect(vf reflect.Value) reflect.Value {
-	for vf.Kind() == reflect.Interface || vf.Kind() == reflect.Ptr {
-		if vf.IsNil() {
-			return vf
-		}
-		vf = vf.Elem()
-	}
-	return vf
-}
-
-func (p *printer) marshalStruct(tinfo *typeInfo, val reflect.Value) error {
-	s := parentStack{p: p}
-	for i := range tinfo.fields {
-		finfo := &tinfo.fields[i]
-		if finfo.flags&fAttr != 0 {
-			continue
-		}
-		vf := finfo.value(val, dontInitNilPointers)
-		if !vf.IsValid() {
-			// The field is behind an anonymous struct field that's
-			// nil. Skip it.
-			continue
-		}
-
-		switch finfo.flags & fMode {
-		case fCDATA, fCharData:
-			emit := EscapeText
-			if finfo.flags&fMode == fCDATA {
-				emit = emitCDATA
-			}
-			if err := s.trim(finfo.parents); err != nil {
-				return err
-			}
-			if vf.CanInterface() && vf.Type().Implements(textMarshalerType) {
-				data, err := vf.Interface().(encoding.TextMarshaler).MarshalText()
-				if err != nil {
-					return err
-				}
-				if err := emit(p, data); err != nil {
-					return err
-				}
-				continue
-			}
-			if vf.CanAddr() {
-				pv := vf.Addr()
-				if pv.CanInterface() && pv.Type().Implements(textMarshalerType) {
-					data, err := pv.Interface().(encoding.TextMarshaler).MarshalText()
-					if err != nil {
-						return err
-					}
-					if err := emit(p, data); err != nil {
-						return err
-					}
-					continue
-				}
-			}
-
-			var scratch [64]byte
-			vf = indirect(vf)
-			switch vf.Kind() {
-			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-				if err := emit(p, strconv.AppendInt(scratch[:0], vf.Int(), 10)); err != nil {
-					return err
-				}
-			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-				if err := emit(p, strconv.AppendUint(scratch[:0], vf.Uint(), 10)); err != nil {
-					return err
-				}
-			case reflect.Float32, reflect.Float64:
-				if err := emit(p, strconv.AppendFloat(scratch[:0], vf.Float(), 'g', -1, vf.Type().Bits())); err != nil {
-					return err
-				}
-			case reflect.Bool:
-				if err := emit(p, strconv.AppendBool(scratch[:0], vf.Bool())); err != nil {
-					return err
-				}
-			case reflect.String:
-				if err := emit(p, []byte(vf.String())); err != nil {
-					return err
-				}
-			case reflect.Slice:
-				if elem, ok := vf.Interface().([]byte); ok {
-					if err := emit(p, elem); err != nil {
-						return err
-					}
-				}
-			}
-			continue
-
-		case fComment:
-			if err := s.trim(finfo.parents); err != nil {
-				return err
-			}
-			vf = indirect(vf)
-			k := vf.Kind()
-			if !(k == reflect.String || k == reflect.Slice && vf.Type().Elem().Kind() == reflect.Uint8) {
-				return fmt.Errorf("xml: bad type for comment field of %s", val.Type())
-			}
-			if vf.Len() == 0 {
-				continue
-			}
-			p.writeIndent(0)
-			p.WriteString("<!--")
-			dashDash := false
-			dashLast := false
-			switch k {
-			case reflect.String:
-				s := vf.String()
-				dashDash = strings.Contains(s, "--")
-				dashLast = s[len(s)-1] == '-'
-				if !dashDash {
-					p.WriteString(s)
-				}
-			case reflect.Slice:
-				b := vf.Bytes()
-				dashDash = bytes.Contains(b, ddBytes)
-				dashLast = b[len(b)-1] == '-'
-				if !dashDash {
-					p.Write(b)
-				}
-			default:
-				panic("can't happen")
-			}
-			if dashDash {
-				return fmt.Errorf(`xml: comments must not contain "--"`)
-			}
-			if dashLast {
-				// "--->" is invalid grammar. Make it "- -->"
-				p.WriteByte(' ')
-			}
-			p.WriteString("-->")
-			continue
-
-		case fInnerXML:
-			vf = indirect(vf)
-			iface := vf.Interface()
-			switch raw := iface.(type) {
-			case []byte:
-				p.Write(raw)
-				continue
-			case string:
-				p.WriteString(raw)
-				continue
-			}
-
-		case fElement, fElement | fAny:
-			if err := s.trim(finfo.parents); err != nil {
-				return err
-			}
-			if len(finfo.parents) > len(s.stack) {
-				if vf.Kind() != reflect.Ptr && vf.Kind() != reflect.Interface || !vf.IsNil() {
-					if err := s.push(finfo.parents[len(s.stack):]); err != nil {
-						return err
-					}
-				}
-			}
-		}
-		if err := p.marshalValue(vf, finfo, nil); err != nil {
-			return err
-		}
-	}
-	s.trim(nil)
-	return p.cachedWriteError()
-}
-
 // return the bufio Writer's cached write error
 func (p *printer) cachedWriteError() error {
 	_, err := p.Write(nil)
@@ -995,7 +1032,7 @@ func (p *printer) writeIndent(depthDelta int) {
 }
 
 type parentStack struct {
-	p     *printer
+	e     TokenEncoder
 	stack []string
 }
 
@@ -1010,7 +1047,7 @@ func (s *parentStack) trim(parents []string) error {
 		}
 	}
 	for i := len(s.stack) - 1; i >= split; i-- {
-		if err := s.p.writeEnd(Name{Local: s.stack[i]}); err != nil {
+		if err := s.e.EncodeToken(EndElement{Name{Local: s.stack[i]}}); err != nil {
 			return err
 		}
 	}
@@ -1021,7 +1058,7 @@ func (s *parentStack) trim(parents []string) error {
 // push adds parent elements to the stack and writes open tags.
 func (s *parentStack) push(parents []string) error {
 	for i := 0; i < len(parents); i++ {
-		if err := s.p.writeStart(&StartElement{Name: Name{Local: parents[i]}}); err != nil {
+		if err := s.e.EncodeToken(StartElement{Name: Name{Local: parents[i]}}); err != nil {
 			return err
 		}
 	}

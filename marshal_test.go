@@ -1178,7 +1178,7 @@ var marshalTests = []struct {
 		},
 	},
 	{
-		ExpectXML: `<a><nested><value>newline: &#xA;; cr: &#xD;; tab: &#x9;;</value></nested><AnyField></AnyField></a>`,
+		ExpectXML: "<a><nested><value>newline: \n; cr: &#xD;; tab: &#x9;;</value></nested><AnyField></AnyField></a>",
 		Value: &AnyTest{
 			Nested:   "newline: \n; cr: \r; tab: \t;",
 			AnyField: AnyHolder{XMLName: Name{Local: "AnyField"}},
