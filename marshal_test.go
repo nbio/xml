@@ -665,7 +665,7 @@ var marshalTests = []struct {
 	{Value: &Port{Type: "ssl", Number: "443"}, ExpectXML: `<port type="ssl">443</port>`},
 	{Value: &Port{Number: "443"}, ExpectXML: `<port>443</port>`},
 	{Value: &Port{Type: "<unix>"}, ExpectXML: `<port type="&lt;unix&gt;"></port>`},
-	// Marshal is not symetric to Unmarshal for these oddities because &apos is written as &#39
+	// Marshal is not symmetric to Unmarshal for these oddities because &apos is written as &#39
 	{Value: &Port{Type: "<un'ix>"}, ExpectXML: `<port type="&lt;un&apos;ix&gt;"></port>`, UnmarshalOnly: true},
 	{Value: &Port{Type: "<un\"ix>"}, ExpectXML: `<port type="&lt;un&quot;ix&gt;"></port>`, UnmarshalOnly: true},
 	{Value: &Port{Type: "<un&ix>"}, ExpectXML: `<port type="&lt;un&amp;ix&gt;"></port>`},
