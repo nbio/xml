@@ -502,6 +502,45 @@ func TestSyntax(t *testing.T) {
 	}
 }
 
+func TestInputLinePos(t *testing.T) {
+	testInput := `<root>
+<?pi
+ ?>  <elt
+att
+=
+"val">
+<![CDATA[
+]]><!--
+
+--></elt>
+</root>`
+	linePos := [][]int{
+		{1, 7},
+		{2, 1},
+		{3, 4},
+		{3, 6},
+		{6, 7},
+		{7, 1},
+		{8, 4},
+		{10, 4},
+		{10, 10},
+		{11, 1},
+		{11, 8},
+	}
+	dec := NewDecoder(strings.NewReader(testInput))
+	for _, want := range linePos {
+		if _, err := dec.Token(); err != nil {
+			t.Errorf("Unexpected error: %v", err)
+			continue
+		}
+
+		gotLine, gotCol := dec.InputPos()
+		if gotLine != want[0] || gotCol != want[1] {
+			t.Errorf("dec.InputPos() = %d,%d, want %d,%d", gotLine, gotCol, want[0], want[1])
+		}
+	}
+}
+
 type allScalars struct {
 	True1     bool
 	True2     bool
@@ -670,6 +709,19 @@ func TestCopyTokenStartElement(t *testing.T) {
 	tok1.(StartElement).Attr[0] = Attr{Name{"", "lang"}, "de"}
 	if reflect.DeepEqual(tok1, tok2) {
 		t.Error("CopyToken(CharData) uses same buffer.")
+	}
+}
+
+func TestCopyTokenComment(t *testing.T) {
+	data := []byte("<!-- some comment -->")
+	var tok1 Token = Comment(data)
+	tok2 := CopyToken(tok1)
+	if !reflect.DeepEqual(tok1, tok2) {
+		t.Error("CopyToken(Comment) != Comment")
+	}
+	data[1] = 'o'
+	if reflect.DeepEqual(tok1, tok2) {
+		t.Error("CopyToken(Comment) uses same buffer.")
 	}
 }
 
@@ -842,7 +894,7 @@ func TestEscapeTextInvalidChar(t *testing.T) {
 	input := []byte("A \x00 terminated string.")
 	expected := "A \uFFFD terminated string."
 
-	buff := new(bytes.Buffer)
+	buff := new(strings.Builder)
 	if err := EscapeText(buff, input); err != nil {
 		t.Fatalf("have %v, want nil", err)
 	}
@@ -869,26 +921,92 @@ func TestIssue8535(t *testing.T) {
 	type ExampleConflict struct {
 		XMLName  Name   `xml:"example"`
 		Link     string `xml:"link"`
-		AtomLink string `xml:"http://www.w3.org/2005/Atom link"` // No conflict but no assignment
+		AtomLink string `xml:"http://www.w3.org/2005/Atom link"` // Same name in a different name space
 	}
-	testCases := []string{
-		`<example>
-    		<title>Example</title>
+	testCase := `<example>
+			<title>Example</title>
 			<link>http://example.com/default</link> <!-- not assigned -->
 			<link>http://example.com/home</link> <!-- not assigned -->
 			<ns:link xmlns:ns="http://www.w3.org/2005/Atom">http://example.com/ns</ns:link>
-		</example>`,
-	}
+		</example>`
 
 	var dest ExampleConflict
-	d := NewDecoder(strings.NewReader(testCases[0]))
+	d := NewDecoder(strings.NewReader(testCase))
 	if err := d.Decode(&dest); err != nil {
-		t.Errorf("%s: Field conflicts : got error %v, want no fail", testCases[0], err)
+		t.Fatal(err)
 	}
 }
 
-func TestIssue11431(t *testing.T) { //
+func TestEncodeXMLNS(t *testing.T) {
+	testCases := []struct {
+		f    func() ([]byte, error)
+		want string
+		ok   bool
+	}{
+		{encodeXMLNS1, `<Test xmlns="http://example.com/ns"><Body>hello world</Body></Test>`, true},
+		{encodeXMLNS2, `<Test><body xmlns="http://example.com/ns">hello world</body></Test>`, true},
+		{encodeXMLNS3, `<Test xmlns="http://example.com/ns"><Body>hello world</Body></Test>`, true},
+		{encodeXMLNS4, `<Test xmlns="http://example.com/ns"><Body>hello world</Body></Test>`, false},
+	}
 
+	for i, tc := range testCases {
+		if b, err := tc.f(); err == nil {
+			if got, want := string(b), tc.want; got != want {
+				t.Errorf("%d: got %s, want %s \n", i, got, want)
+			}
+		} else {
+			t.Errorf("%d: marshal failed with %s", i, err)
+		}
+	}
+}
+
+func encodeXMLNS1() ([]byte, error) {
+
+	type T struct {
+		XMLName Name   `xml:"Test"`
+		Ns      string `xml:"xmlns,attr"`
+		Body    string
+	}
+
+	s := &T{Ns: "http://example.com/ns", Body: "hello world"}
+	return Marshal(s)
+}
+
+func encodeXMLNS2() ([]byte, error) {
+
+	type Test struct {
+		Body string `xml:"http://example.com/ns body"`
+	}
+
+	s := &Test{Body: "hello world"}
+	return Marshal(s)
+}
+
+func encodeXMLNS3() ([]byte, error) {
+
+	type Test struct {
+		XMLName Name `xml:"http://example.com/ns Test"`
+		Body    string
+	}
+
+	//s := &Test{XMLName: Name{"http://example.com/ns",""}, Body: "hello world"} is unusable as the "-" is missing
+	// as documentation states
+	s := &Test{Body: "hello world"}
+	return Marshal(s)
+}
+
+func encodeXMLNS4() ([]byte, error) {
+
+	type Test struct {
+		Ns   string `xml:"xmlns,attr"`
+		Body string
+	}
+
+	s := &Test{Ns: "http://example.com/ns", Body: "hello world"}
+	return Marshal(s)
+}
+
+func TestIssue11431(t *testing.T) {
 	type Test struct {
 		XMLName Name   `xml:"Test"`
 		Ns      string `xml:"xmlns,attr"`
@@ -908,7 +1026,6 @@ func TestIssue11431(t *testing.T) { //
 }
 
 func TestIssue11431NsWoAttr(t *testing.T) {
-
 	type Test struct {
 		Body string `xml:"http://example.com/ns body"`
 	}
@@ -925,8 +1042,7 @@ func TestIssue11431NsWoAttr(t *testing.T) {
 	}
 }
 
-func TestIssue11431XMLName(t *testing.T) { //
-
+func TestIssue11431XMLName(t *testing.T) {
 	type Test struct {
 		XMLName Name `xml:"http://example.com/ns Test"`
 		Body    string
@@ -946,8 +1062,7 @@ func TestIssue11431XMLName(t *testing.T) { //
 	}
 }
 
-func TestIssue11431UsingAttr(t *testing.T) { //
-
+func TestIssue11431UsingAttr(t *testing.T) {
 	type T struct {
 		Ns   string `xml:"xmlns,attr"`
 		Body string
@@ -968,7 +1083,6 @@ func TestIssue11431UsingAttr(t *testing.T) { //
 }
 
 func TestIssue11496(t *testing.T) { // Issue answered
-
 	type Person struct {
 		XMLName Name   `xml:"ns1 person"`
 		Name    string `xml:"name"`
@@ -1005,7 +1119,6 @@ func TestIssue11496(t *testing.T) { // Issue answered
 }
 
 func TestIssue8068(t *testing.T) {
-
 	testCases := []struct {
 		s  string
 		ok bool
@@ -1256,35 +1369,86 @@ func TestIssue12417(t *testing.T) {
 	}
 }
 
-func TestIssue20396(t *testing.T) {
-	testCases := []struct {
-		s  string
-		ok bool
-	}{ // Should not allow to change namespace of opening tag
-		{`<a:te:st xmlns:a="abcd"/>`, false},
-		{`<a:te=st xmlns:a="abcd"/>`, false},
-		{`<a:te&st xmlns:a="abcd"/>`, false},
-		{`<a:test xmlns:a="abcd"/>`, true},
+func TestIssue7113(t *testing.T) {
+	type C struct {
+		XMLName Name `xml:""` // Sets empty namespace
 	}
+
+	type A struct {
+		XMLName Name `xml:""`
+		C       C    `xml:""`
+	}
+
+	var a A
+	structSpace := "b"
+	xmlTest := `<A xmlns="` + structSpace + `"><C xmlns=""></C></A>`
+	t.Log(xmlTest)
+	err := Unmarshal([]byte(xmlTest), &a)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if a.XMLName.Space != structSpace {
+		t.Errorf("overidding with empty namespace: unmarshalling, got %s, want %s\n", a.XMLName.Space, structSpace)
+	}
+	if len(a.C.XMLName.Space) != 0 {
+		t.Fatalf("overidding with empty namespace: unmarshalling, got %s, want empty\n", a.C.XMLName.Space)
+	}
+
+	var b []byte
+	b, err = Marshal(&a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.C.XMLName.Space) != 0 {
+		t.Errorf("overidding with empty namespace: marshaling, got %s in C tag which should be empty\n", a.C.XMLName.Space)
+	}
+	if string(b) != xmlTest {
+		t.Fatalf("overidding with empty namespace: marshalling, got %s, want %s\n", b, xmlTest)
+	}
+	var c A
+	err = Unmarshal(b, &c)
+	if err != nil {
+		t.Fatalf("second Unmarshal failed: %s", err)
+	}
+	if c.XMLName.Space != "b" {
+		t.Errorf("overidding with empty namespace: after marshaling & unmarshaling, XML name space: got %s, want %s\n", a.XMLName.Space, structSpace)
+	}
+	if len(c.C.XMLName.Space) != 0 {
+		t.Errorf("overidding with empty namespace: after marshaling & unmarshaling, got %s, want empty\n", a.C.XMLName.Space)
+	}
+}
+
+func TestIssue20396(t *testing.T) {
+
+	var attrError = UnmarshalError("XML syntax error on line 1: expected attribute name in element")
+
+	testCases := []struct {
+		s       string
+		wantErr error
+	}{
+		{`<a:te:st xmlns:a="abcd"/>`, // Issue 20396
+			UnmarshalError("XML syntax error on line 1: expected element name after <")},
+		{`<a:te=st xmlns:a="abcd"/>`, attrError},
+		{`<a:te&st xmlns:a="abcd"/>`, attrError},
+		{`<a:test xmlns:a="abcd"/>`, nil},
+		{`<a:te:st xmlns:a="abcd">1</a:te:st>`,
+			UnmarshalError("XML syntax error on line 1: expected element name after <")},
+		{`<a:te=st xmlns:a="abcd">1</a:te=st>`, attrError},
+		{`<a:te&st xmlns:a="abcd">1</a:te&st>`, attrError},
+		{`<a:test xmlns:a="abcd">1</a:test>`, nil},
+	}
+
+	var dest string
 	for _, tc := range testCases {
-		d := NewDecoder(strings.NewReader(tc.s))
-		var err error
-		for {
-			_, err = d.Token()
-			if err != nil {
-				if err == io.EOF { //EOF indicates that process is complete
-					err = nil
-				}
-				break
+		if got, want := Unmarshal([]byte(tc.s), &dest), tc.wantErr; got != want {
+			if got == nil {
+				t.Errorf("%s: Unexpected success, want %v", tc.s, want)
+			} else if want == nil {
+				t.Errorf("%s: Unexpected error, got %v", tc.s, got)
+			} else if got.Error() != want.Error() {
+				t.Errorf("%s: got %v, want %v", tc.s, got, want)
 			}
-		}
-		if err != nil && tc.ok {
-			err = d.err
-			t.Errorf("%q: Multiple colons in tag : expected no error, got %s", tc.s, err)
-			continue
-		}
-		if err == nil && !tc.ok {
-			t.Errorf("%q: Multiple colons in tag : expected error, got nil", tc.s)
 		}
 	}
 }
@@ -1564,63 +1728,6 @@ func TestMarshalXMLName(t *testing.T) {
 	}
 }
 
-func TestIssue7113(t *testing.T) {
-	type C struct {
-		XMLName Name `xml:""` // To reset namespace to ""
-	}
-
-	type A struct {
-		XMLName Name `xml:""`
-		C       C    `xml:""`
-	}
-
-	var a A
-	structSpace := "b"
-	fieldSpace := ""
-	xmlTests := []string{
-		`<A xmlns="` + structSpace + `"><C xmlns="` + fieldSpace + `"></C></A>`,
-		// `<A><C></C></A>`,
-	}
-	for _, xmltest := range xmlTests {
-
-		err := Unmarshal([]byte(xmltest), &a)
-		if err != nil {
-			t.Errorf("overidding with empty namespace: expected no error, got %s", err)
-		}
-		if a.XMLName.Space != structSpace {
-			t.Errorf("overidding with empty namespace: before marshaling, got %s != %s, want == \n", a.XMLName.Space, structSpace)
-		}
-		if a.C.XMLName.Space != fieldSpace {
-			t.Errorf("overidding with empty namespace: before marshaling, got %s != %s, want == \n", a.C.XMLName.Space, fieldSpace)
-		}
-
-		var b []byte
-		/* Because of unmarshaling, namespaces are already assigned */
-		b, err = Marshal(&a)
-		if string(b) != xmltest {
-			t.Errorf("overidding with empty namespace: after marshaling, got %s != %s, want == \n", string(b), xmltest)
-			return
-		}
-		// Unmarshaling has no interest if the previous test succeed as the structs are initially empty unless
-		if a.C.XMLName.Local != "C" {
-			t.Errorf("overidding with empty namespace: after marshaling, unmarshaling will fail, got %s as C tag space which should be tag name C \n", a.C.XMLName.Local)
-		}
-		if a.C.XMLName.Space != "" {
-			t.Errorf("overidding with empty namespace: after marshaling, unmarshaling will fail, got %s in C tag which should be empty \n", a.C.XMLName.Space)
-		}
-		err = Unmarshal(b, &a)
-		if err != nil {
-			t.Errorf("overidding with empty namespace: expected no error, got %s", err)
-		}
-		if a.XMLName.Space != "b" {
-			t.Errorf("overidding with empty namespace: after marshaling & unmarshaling, got %s in XMLName != %s, want == \n", a.XMLName.Space, "b")
-		}
-		if a.C.XMLName.Space != "" {
-			t.Errorf("overidding with empty namespace: after marshaling & unmarshaling, got %q in C tag != %q, want == \n", a.C.XMLName.Space, "")
-		}
-	}
-}
-
 func tokenMap(mapping func(t Token) Token) func(TokenReader) TokenReader {
 	return func(src TokenReader) TokenReader {
 		return mapper{
@@ -1764,5 +1871,158 @@ func TestRoundTrip(t *testing.T) {
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) { testRoundTrip(t, input) })
+	}
+}
+
+func TestParseErrors(t *testing.T) {
+	withDefaultHeader := func(s string) string {
+		return `<?xml version="1.0" encoding="UTF-8"?>` + s
+	}
+	tests := []struct {
+		src string
+		err string
+	}{
+		{withDefaultHeader(`</foo>`), `unexpected end element </foo>`},
+		{withDefaultHeader(`<x:foo></y:foo>`), `element <foo> in space x closed by </foo> in space y`},
+		{withDefaultHeader(`<? not ok ?>`), `expected target name after <?`},
+		{withDefaultHeader(`<!- not ok -->`), `invalid sequence <!- not part of <!--`},
+		{withDefaultHeader(`<!-? not ok -->`), `invalid sequence <!- not part of <!--`},
+		{withDefaultHeader(`<![not ok]>`), `invalid <![ sequence`},
+		{withDefaultHeader("\xf1"), `invalid UTF-8`},
+
+		// Header-related errors.
+		{`<?xml version="1.1" encoding="UTF-8"?>`, `unsupported version "1.1"; only version 1.0 is supported`},
+
+		// Cases below are for "no errors".
+		{withDefaultHeader(`<?ok?>`), ``},
+		{withDefaultHeader(`<?ok version="ok"?>`), ``},
+	}
+
+	for _, test := range tests {
+		d := NewDecoder(strings.NewReader(test.src))
+		var err error
+		for {
+			_, err = d.Token()
+			if err != nil {
+				break
+			}
+		}
+		if test.err == "" {
+			if err != io.EOF {
+				t.Errorf("parse %s: have %q error, expected none", test.src, err)
+			}
+			continue
+		}
+		// Inv: err != nil
+		if err == io.EOF {
+			t.Errorf("parse %s: unexpected EOF", test.src)
+			continue
+		}
+		if !strings.Contains(err.Error(), test.err) {
+			t.Errorf("parse %s: can't find %q error sudbstring\nerror: %q", test.src, test.err, err)
+			continue
+		}
+	}
+}
+
+const testInputHTMLAutoClose = `<?xml version="1.0" encoding="UTF-8"?>
+<br>
+<br/><br/>
+<br><br>
+<br></br>
+<BR>
+<BR/><BR/>
+<Br></Br>
+<BR><span id="test">abc</span><br/><br/>`
+
+func BenchmarkHTMLAutoClose(b *testing.B) {
+	b.RunParallel(func(p *testing.PB) {
+		for p.Next() {
+			d := NewDecoder(strings.NewReader(testInputHTMLAutoClose))
+			d.Strict = false
+			d.AutoClose = HTMLAutoClose
+			d.Entity = HTMLEntity
+			for {
+				_, err := d.Token()
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+					b.Fatalf("unexpected error: %v", err)
+				}
+			}
+		}
+	})
+}
+
+func TestHTMLAutoClose(t *testing.T) {
+	wantTokens := []Token{
+		ProcInst{"xml", []byte(`version="1.0" encoding="UTF-8"`)},
+		CharData("\n"),
+		StartElement{Name{"", "br"}, []Attr{}},
+		EndElement{Name{"", "br"}},
+		CharData("\n"),
+		StartElement{Name{"", "br"}, []Attr{}},
+		EndElement{Name{"", "br"}},
+		StartElement{Name{"", "br"}, []Attr{}},
+		EndElement{Name{"", "br"}},
+		CharData("\n"),
+		StartElement{Name{"", "br"}, []Attr{}},
+		EndElement{Name{"", "br"}},
+		StartElement{Name{"", "br"}, []Attr{}},
+		EndElement{Name{"", "br"}},
+		CharData("\n"),
+		StartElement{Name{"", "br"}, []Attr{}},
+		EndElement{Name{"", "br"}},
+		CharData("\n"),
+		StartElement{Name{"", "BR"}, []Attr{}},
+		EndElement{Name{"", "BR"}},
+		CharData("\n"),
+		StartElement{Name{"", "BR"}, []Attr{}},
+		EndElement{Name{"", "BR"}},
+		StartElement{Name{"", "BR"}, []Attr{}},
+		EndElement{Name{"", "BR"}},
+		CharData("\n"),
+		StartElement{Name{"", "Br"}, []Attr{}},
+		EndElement{Name{"", "Br"}},
+		CharData("\n"),
+		StartElement{Name{"", "BR"}, []Attr{}},
+		EndElement{Name{"", "BR"}},
+		StartElement{Name{"", "span"}, []Attr{{Name: Name{"", "id"}, Value: "test"}}},
+		CharData("abc"),
+		EndElement{Name{"", "span"}},
+		StartElement{Name{"", "br"}, []Attr{}},
+		EndElement{Name{"", "br"}},
+		StartElement{Name{"", "br"}, []Attr{}},
+		EndElement{Name{"", "br"}},
+	}
+
+	d := NewDecoder(strings.NewReader(testInputHTMLAutoClose))
+	d.Strict = false
+	d.AutoClose = HTMLAutoClose
+	d.Entity = HTMLEntity
+	var haveTokens []Token
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("unexpected error: %v", err)
+		}
+		haveTokens = append(haveTokens, CopyToken(tok))
+	}
+	if len(haveTokens) != len(wantTokens) {
+		t.Errorf("tokens count mismatch: have %d, want %d", len(haveTokens), len(wantTokens))
+	}
+	for i, want := range wantTokens {
+		if i >= len(haveTokens) {
+			t.Errorf("token[%d] expected %#v, have no token", i, want)
+		} else {
+			have := haveTokens[i]
+			if !reflect.DeepEqual(have, want) {
+				t.Errorf("token[%d] mismatch:\nhave: %#v\nwant: %#v", i, have, want)
+			}
+		}
 	}
 }

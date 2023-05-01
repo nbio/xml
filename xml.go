@@ -10,9 +10,6 @@ package xml
 //    Annotated XML spec: https://www.xml.com/axml/testaxml.htm
 //    XML name spaces: https://www.w3.org/TR/REC-xml-names/
 
-// TODO(rsc):
-//	Test error handling.
-
 import (
 	"bufio"
 	"bytes"
@@ -52,7 +49,7 @@ type Attr struct {
 
 // A Token is an interface holding one of the token types:
 // StartElement, EndElement, CharData, Comment, ProcInst, or Directive.
-type Token interface{}
+type Token any
 
 // A StartElement represents an XML start element.
 type StartElement struct {
@@ -83,21 +80,15 @@ type EndElement struct {
 // the characters they represent.
 type CharData []byte
 
-func makeCopy(b []byte) []byte {
-	b1 := make([]byte, len(b))
-	copy(b1, b)
-	return b1
-}
-
 // Copy creates a new copy of CharData.
-func (c CharData) Copy() CharData { return CharData(makeCopy(c)) }
+func (c CharData) Copy() CharData { return CharData(bytes.Clone(c)) }
 
 // A Comment represents an XML comment of the form <!--comment-->.
 // The bytes do not include the <!-- and --> comment markers.
 type Comment []byte
 
 // Copy creates a new copy of Comment.
-func (c Comment) Copy() Comment { return Comment(makeCopy(c)) }
+func (c Comment) Copy() Comment { return Comment(bytes.Clone(c)) }
 
 // A ProcInst represents an XML processing instruction of the form <?target inst?>
 type ProcInst struct {
@@ -107,7 +98,7 @@ type ProcInst struct {
 
 // Copy creates a new copy of ProcInst.
 func (p ProcInst) Copy() ProcInst {
-	p.Inst = makeCopy(p.Inst)
+	p.Inst = bytes.Clone(p.Inst)
 	return p
 }
 
@@ -116,7 +107,7 @@ func (p ProcInst) Copy() ProcInst {
 type Directive []byte
 
 // Copy creates a new copy of Directive.
-func (d Directive) Copy() Directive { return Directive(makeCopy(d)) }
+func (d Directive) Copy() Directive { return Directive(bytes.Clone(d)) }
 
 // CopyToken returns a copy of a Token.
 func CopyToken(t Token) Token {
@@ -219,6 +210,7 @@ type Decoder struct {
 	ns             map[string]string // url for a prefix ns[.Space]=.Value
 	err            error
 	line           int
+	linestart      int64
 	offset         int64
 	unmarshalDepth int
 }
@@ -331,8 +323,7 @@ func (d *Decoder) Token() (Token, error) {
 			}
 		}
 
-		d.pushElement(t1.Name) // Pushing the element with its eventual prefix
-		// Assigning value to Space of the attributed using the NS bindings
+		d.pushElement(t1.Name)
 		d.translate(&t1.Name, true)
 		for i := range t1.Attr {
 			d.translate(&t1.Attr[i].Name, false)
@@ -340,7 +331,7 @@ func (d *Decoder) Token() (Token, error) {
 		t = t1
 
 	case EndElement:
-		if !d.popElement(&t1) { // Popping the element with its eventual prefix for appropriate comparison
+		if !d.popElement(&t1) {
 			return nil, d.err
 		}
 		t = t1
@@ -514,8 +505,7 @@ func (d *Decoder) popElement(t *EndElement) bool {
 		return false
 	}
 
-	// translating before removal of ns
-	d.translate(&t.Name, true) // returning a namespace and not its prefix as doc says
+	d.translate(&t.Name, true)
 
 	// Pop stack until a Start or EOF is on the top, undoing the
 	// translations that were associated with the element we just closed.
@@ -537,12 +527,11 @@ func (d *Decoder) autoClose(t Token) (Token, bool) {
 	if d.stk == nil || d.stk.kind != stkStart {
 		return nil, false
 	}
-	name := strings.ToLower(d.stk.name.Local)
 	for _, s := range d.AutoClose {
-		if strings.ToLower(s) == name {
+		if strings.EqualFold(s, d.stk.name.Local) {
 			// This one should be auto closed if t doesn't close it.
 			et, ok := t.(EndElement)
-			if !ok || et.Name.Local != name {
+			if !ok || !strings.EqualFold(et.Name.Local, d.stk.name.Local) {
 				return EndElement{d.stk.name}, true
 			}
 			break
@@ -939,6 +928,7 @@ func (d *Decoder) getc() (b byte, ok bool) {
 	}
 	if b == '\n' {
 		d.line++
+		d.linestart = d.offset + 1
 	}
 	d.offset++
 	return b, true
@@ -949,6 +939,13 @@ func (d *Decoder) getc() (b byte, ok bool) {
 // and the beginning of the next token.
 func (d *Decoder) InputOffset() int64 {
 	return d.offset
+}
+
+// InputPos returns the line of the current decoder position and the 1 based
+// input position of the line. The position gives the location of the end of the
+// most recently returned token.
+func (d *Decoder) InputPos() (line, column int) {
+	return d.line, int(d.offset-d.linestart) + 1
 }
 
 // Return saved offset.
@@ -1116,7 +1113,7 @@ Input:
 
 			if haveText {
 				d.buf.Truncate(before)
-				d.buf.Write([]byte(text))
+				d.buf.WriteString(text)
 				b0, b1 = 0, 0
 				continue Input
 			}
@@ -2039,25 +2036,26 @@ func emitCDATA(w io.Writer, s []byte) error {
 	if _, err := w.Write(cdataStart); err != nil {
 		return err
 	}
+
 	for {
-		i := bytes.Index(s, cdataEnd)
-		if i >= 0 && i+len(cdataEnd) <= len(s) {
-			// Found a nested CDATA directive end.
-			if _, err := w.Write(s[:i]); err != nil {
-				return err
-			}
-			if _, err := w.Write(cdataEscape); err != nil {
-				return err
-			}
-			i += len(cdataEnd)
-		} else {
-			if _, err := w.Write(s); err != nil {
-				return err
-			}
+		before, after, ok := bytes.Cut(s, cdataEnd)
+		if !ok {
 			break
 		}
-		s = s[i:]
+		// Found a nested CDATA directive end.
+		if _, err := w.Write(before); err != nil {
+			return err
+		}
+		if _, err := w.Write(cdataEscape); err != nil {
+			return err
+		}
+		s = after
 	}
+
+	if _, err := w.Write(s); err != nil {
+		return err
+	}
+
 	_, err := w.Write(cdataEnd)
 	return err
 }
@@ -2068,20 +2066,16 @@ func procInst(param, s string) string {
 	// TODO: this parsing is somewhat lame and not exact.
 	// It works for all actual cases, though.
 	param = param + "="
-	idx := strings.Index(s, param)
-	if idx == -1 {
-		return ""
-	}
-	v := s[idx+len(param):]
+	_, v, _ := strings.Cut(s, param)
 	if v == "" {
 		return ""
 	}
 	if v[0] != '\'' && v[0] != '"' {
 		return ""
 	}
-	idx = strings.IndexRune(v[1:], rune(v[0]))
-	if idx == -1 {
+	unquote, _, ok := strings.Cut(v[1:], v[:1])
+	if !ok {
 		return ""
 	}
-	return v[1 : idx+1]
+	return unquote
 }
