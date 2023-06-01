@@ -265,6 +265,9 @@ func NewTokenDecoder(t TokenReader) *Decoder {
 // or EOF before all expected end elements,
 // it will return an error.
 //
+// If CharsetReader is called and returns an error,
+// the error is wrapped and returned.
+//
 // Token implements XML namespaces as described by
 // https://www.w3.org/TR/REC-xml-names/. Each of the
 // Name structures contained in the Token has the Space
@@ -648,7 +651,7 @@ func (d *Decoder) rawToken() (Token, error) {
 				}
 				newr, err := d.CharsetReader(enc, d.r.(io.Reader))
 				if err != nil {
-					d.err = fmt.Errorf("xml: opening charset %q: %v", enc, err)
+					d.err = fmt.Errorf("xml: opening charset %q: %w", enc, err)
 					return nil, d.err
 				}
 				if newr == nil {

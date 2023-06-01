@@ -580,7 +580,7 @@ func (p *printer) marshalValue(val reflect.Value, finfo *fieldInfo, startTemplat
 			continue
 		}
 
-		name := Name{finfo.xmlns, joinPrefixed(finfo.prefix, finfo.name)}
+		name := Name{Space: finfo.xmlns, Local: joinPrefixed(finfo.prefix, finfo.name)}
 		if err := p.marshalAttr(&start, name, fv); err != nil {
 			return err
 		}
@@ -590,7 +590,7 @@ func (p *printer) marshalValue(val reflect.Value, finfo *fieldInfo, startTemplat
 	if tinfo.xmlname != nil && start.Name.Space == "" &&
 		len(p.elements) != 0 && p.elements[len(p.elements)-1].xmlns != "" {
 		// Add attr xmlns="" to override the outer tag namespace
-		start.Attr = append(start.Attr, Attr{Name{"", xmlnsPrefix}, ""})
+		start.Attr = append(start.Attr, Attr{Name{Space: "", Local: xmlnsPrefix}, ""})
 	}
 
 	if err := p.writeStart(&start); err != nil {
