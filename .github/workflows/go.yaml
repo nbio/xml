@@ -18,23 +18,21 @@ jobs:
           submodules: recursive
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v4.1.0
         with:
-          go-version: ^1
+          go-version-file: go.mod
+          check-latest: true
 
       - name: Vet Go code
         run: go vet ./encoding/xml
-        working-directory: vendor/go/src
 
       - name: Test Go code
-        run: go test -v -race ./encoding/xml
-        working-directory: vendor/go/src
+        run: go test -v -race ./...
 
       - name: Test Go without cgo
         env:
           CGO_ENABLED: 0
-        run: go test -v ./encoding/xml
-        working-directory: vendor/go/src
+        run: go test -v ./...
 
       - name: Verify repo is unchanged
         run: git diff --exit-code HEAD
