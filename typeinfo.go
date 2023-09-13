@@ -47,7 +47,7 @@ const (
 
 var tinfoMap sync.Map // map[reflect.Type]*typeInfo
 
-var nameType = reflect.TypeOf(Name{})
+var nameType = reflect.TypeFor[Name]()
 
 // getTypeInfo returns the typeInfo structure with details necessary
 // for marshaling and unmarshaling typ.
@@ -253,13 +253,6 @@ func lookupXMLName(typ reflect.Type) (xmlname *fieldInfo) {
 		break
 	}
 	return nil
-}
-
-func min(a, b int) int {
-	if a <= b {
-		return a
-	}
-	return b
 }
 
 // addFieldInfo adds finfo to tinfo.fields if there are no
