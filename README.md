@@ -34,3 +34,9 @@ https://play.golang.org/p/-6Ee8tcLl2L
 // Instead of "encoding/xml"
 import "github.com/nbio/xml"
 ```
+
+## Notes
+
+Because this package tracks the current [master] branch of the Go repository, only the latest stable release of Go is guaranteed to be supported. The following commits are not present in this fork to permit use under the current stable release:
+
+- [encoding/xml: use reflect.TypeFor for known types](https://github.com/golang/go/commit/db25bc19e5221c7df2caed3b1daeda673ec757d9)
