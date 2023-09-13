@@ -35,10 +35,8 @@ https://play.golang.org/p/-6Ee8tcLl2L
 import "github.com/nbio/xml"
 ```
 
-## Development
+## Notes
 
-To ease keeping this code in sync with a fork of Go, this repository contains a `go.mod` file in `vendor/go/src` that declares itself as the `std` package. This package must be tested from that directory:
+Because this package tracks the current [master] branch of the Go repository, only the latest stable release of Go is guaranteed to be supported. The following commits are not present in this fork to permit use under the current stable release:
 
-```shell
-cd vendor/go/src && go test -v ./encoding/xml
-```
+- [encoding/xml: use reflect.TypeFor for known types](https://github.com/golang/go/commit/db25bc19e5221c7df2caed3b1daeda673ec757d9)
