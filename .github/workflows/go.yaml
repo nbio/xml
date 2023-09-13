@@ -24,7 +24,7 @@ jobs:
           check-latest: true
 
       - name: Vet Go code
-        run: go vet ./encoding/xml
+        run: go vet ./...
 
       - name: Test Go code
         run: go test -v -race ./...
