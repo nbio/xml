@@ -1,5 +1,8 @@
 # `encoding/xml` with namespace prefixes
 
+[![build status](https://img.shields.io/github/actions/workflow/status/nbio/xml/go.yaml?branch=main)](https://github.com/nbio/xml/actions)
+[![pkg.go.dev](https://img.shields.io/badge/docs-pkg.go.dev-blue.svg)](https://pkg.go.dev/github.com/nbio/xml)
+
 This is a fork of the Go [encoding/xml](https://pkg.go.dev/encoding/xml) package that improves support for XML namespaces, kept in sync with [golang/go#48641](https://github.com/golang/go/pull/48641).
 
 It allows round-trip unmarshaling/marshaling with explicit namespace prefixes. For example, this can be unmarshalled and re-marshalled into this precise XML:
