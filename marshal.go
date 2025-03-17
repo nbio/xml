@@ -215,6 +215,7 @@ func (enc *Encoder) EncodeToken(t Token) error {
 		if err := p.writeStart((*StartElement)(&t), true); err != nil {
 			return err
 		}
+		p.writeIndent(-1)
 	case StartElement:
 		if err := p.writeStart(&t, false); err != nil {
 			return err
