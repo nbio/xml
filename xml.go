@@ -73,6 +73,18 @@ func (e StartElement) End() EndElement {
 	return EndElement{e.Name}
 }
 
+// A SelfClosingElement represents a self-closing XML element.
+// It is otherwise identical to StartElement.
+type SelfClosingElement StartElement
+
+// Copy creates a new copy of SelfClosingElement.
+func (e SelfClosingElement) Copy() SelfClosingElement {
+	attrs := make([]Attr, len(e.Attr))
+	copy(attrs, e.Attr)
+	e.Attr = attrs
+	return e
+}
+
 // An EndElement represents an XML end element.
 type EndElement struct {
 	Name Name
