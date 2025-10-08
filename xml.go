@@ -1035,11 +1035,6 @@ Input:
 			d.ungetc('<')
 			break Input
 		}
-		// This occurs only for an unquoted attr name.
-		if b == '>' && !cdata && quote < 0 { // Possible end of tag reached
-			d.ungetc('>') // Leaving end of tag available
-			break         // returning text
-		}
 		if quote >= 0 && b == byte(quote) {
 			break Input
 		}

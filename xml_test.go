@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -472,6 +473,64 @@ func TestNestedDirectives(t *testing.T) {
 		if !reflect.DeepEqual(have, want) {
 			t.Errorf("token %d = %#v want %#v", i, have, want)
 		}
+	}
+}
+
+// Test parsing XML with > in text
+func TestGreaterThanInText(t *testing.T) {
+	testCases := []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "multiline tag with > in text",
+			input: `<field
+  >value with > in it</field>`,
+		},
+		{
+			name:  "simple > in text",
+			input: `<field>value with > in it</field>`,
+		},
+		{
+			name: "xml declaration and namespace",
+			input: `<?xml version="1.0" encoding="UTF-8" ?>
+<root xmlns="http://example.com">
+    <field
+  >value with > in it</field>
+</root>`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := NewDecoder(strings.NewReader(tc.input))
+			d.Strict = true
+
+			// Parse all tokens with a timeout to detect hangs
+			done := make(chan error, 1)
+			go func() {
+				for {
+					_, err := d.Token()
+					if err == io.EOF {
+						done <- nil
+						return
+					}
+					if err != nil {
+						done <- err
+						return
+					}
+				}
+			}()
+
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("test timed out - parser hung")
+			}
+		})
 	}
 }
 
