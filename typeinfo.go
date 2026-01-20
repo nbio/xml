@@ -40,6 +40,8 @@ const (
 
 	fOmitEmpty
 
+	fSelfClosing
+
 	fMode = fElement | fAttr | fCDATA | fCharData | fInnerXML | fComment | fAny
 
 	xmlName = "XMLName"
@@ -140,6 +142,8 @@ func structFieldInfo(typ reflect.Type, f *reflect.StructField) (*fieldInfo, erro
 				finfo.flags |= fAny
 			case "omitempty":
 				finfo.flags |= fOmitEmpty
+			case "selfclosing":
+				finfo.flags |= fSelfClosing
 			}
 		}
 
@@ -160,6 +164,9 @@ func structFieldInfo(typ reflect.Type, f *reflect.StructField) (*fieldInfo, erro
 			finfo.flags |= fElement
 		}
 		if finfo.flags&fOmitEmpty != 0 && finfo.flags&(fElement|fAttr) == 0 {
+			valid = false
+		}
+		if finfo.flags&fSelfClosing != 0 && finfo.flags&fElement == 0 {
 			valid = false
 		}
 		if !valid {

@@ -2090,3 +2090,33 @@ func TestHTMLAutoClose(t *testing.T) {
 		}
 	}
 }
+
+// PR #20
+// Indentation not correct after self closing element
+func TestSelfClosingIndentation(t *testing.T) {
+	must := func(err error, msg string) {
+		if err != nil {
+			t.Errorf("%s: error = %v", msg, err)
+		}
+	}
+	// Arrange
+	writer := strings.Builder{}
+	encoder := NewEncoder(&writer)
+	encoder.Indent("", "   ")
+
+	// Act
+	must(encoder.EncodeToken(StartElement{Name: Name{Local: "RootElement"}}), "start root element")
+	must(encoder.EncodeToken(SelfClosingElement{Name: Name{Local: "Child1"}}), "child1")
+	must(encoder.EncodeToken(SelfClosingElement{Name: Name{Local: "Child2"}}), "child2")
+	must(encoder.EncodeToken(EndElement{Name: Name{Local: "RootElement"}}), "end root element")
+	must(encoder.Flush(), "flush")
+
+	// Assert
+	expected := `<RootElement>
+   <Child1/>
+   <Child2/>
+</RootElement>`
+	if writer.String() != expected {
+		t.Errorf("output mismatch:\nhave: %#v\nwant: %#v", writer.String(), expected)
+	}
+}
