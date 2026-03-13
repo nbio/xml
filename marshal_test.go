@@ -530,7 +530,15 @@ type Generic[T any] struct {
 
 type EPP struct {
 	XMLName struct{} `xml:"urn:ietf:params:xml:ns:epp-1.0 epp"`
+	Hello   *Hello   `xml:"hello,omitempty,selfclosing"`
 	Command *Command `xml:"command,omitempty"`
+}
+
+type Hello struct{}
+
+type Closer struct {
+	XMLName  struct{} `xml:"closer,selfclosing"`
+	Beverage string   `xml:"beverage,attr,omitempty"`
 }
 
 type Command struct {
@@ -1698,10 +1706,24 @@ var marshalTests = []struct {
 		UnmarshalOnly: true,
 	},
 
+	// Test self-closing tags
+	{
+		ExpectXML: `<closer/>`,
+		Value:     &Closer{},
+	},
+	{
+		ExpectXML: `<closer beverage="coffee"/>`,
+		Value:     &Closer{Beverage: "coffee"},
+	},
+
 	// Test namespace prefixes
 	{
 		ExpectXML: `<epp xmlns="urn:ietf:params:xml:ns:epp-1.0"></epp>`,
 		Value:     &EPP{},
+	},
+	{
+		ExpectXML: `<epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><hello/></epp>`,
+		Value:     &EPP{Hello: &Hello{}},
 	},
 	{
 		ExpectXML: `<epp xmlns="urn:ietf:params:xml:ns:epp-1.0"><command></command></epp>`,
@@ -2065,6 +2087,22 @@ var encodeTokenTests = []struct {
 		StartElement{Name{"space", "local"}, nil},
 	},
 	want: `<local xmlns="space">`,
+}, {
+	desc: "self-closing element with namespace",
+	toks: []Token{
+		SelfClosingElement{Name{"space", "local"}, nil},
+	},
+	want: `<local xmlns="space"/>`,
+}, {
+	desc: "self-closing elements inside other elements",
+	toks: []Token{
+		StartElement{Name{"", "outer"}, nil},
+		SelfClosingElement{Name{"", "a"}, nil},
+		SelfClosingElement{Name{"", "b"}, nil},
+		SelfClosingElement{Name{"", "c"}, nil},
+		EndElement{Name{"", "outer"}},
+	},
+	want: `<outer><a/><b/><c/></outer>`,
 }, {
 	desc: "start element with no name",
 	toks: []Token{

@@ -211,8 +211,13 @@ func (enc *Encoder) EncodeToken(t Token) error {
 
 	p := &enc.p
 	switch t := t.(type) {
+	case SelfClosingElement:
+		if err := p.writeStart((*StartElement)(&t), true); err != nil {
+			return err
+		}
+		p.writeIndent(-1)
 	case StartElement:
-		if err := p.writeStart(&t); err != nil {
+		if err := p.writeStart(&t, false); err != nil {
 			return err
 		}
 	case EndElement:
@@ -593,7 +598,16 @@ func (p *printer) marshalValue(val reflect.Value, finfo *fieldInfo, startTemplat
 		start.Attr = append(start.Attr, Attr{Name{Space: "", Local: xmlnsPrefix}, ""})
 	}
 
-	if err := p.writeStart(&start); err != nil {
+	// If this is a self-closing tag, write the tag and return.
+	if finfo != nil && finfo.flags&fSelfClosing != 0 ||
+		tinfo.xmlname != nil && tinfo.xmlname.flags&fSelfClosing != 0 {
+		if err := p.writeStart(&start, true); err != nil {
+			return err
+		}
+		return p.cachedWriteError()
+	}
+
+	if err := p.writeStart(&start, false); err != nil {
 		return err
 	}
 
@@ -748,7 +762,7 @@ func (p *printer) marshalInterface(val Marshaler, start StartElement) error {
 
 // marshalTextInterface marshals a TextMarshaler interface value.
 func (p *printer) marshalTextInterface(val encoding.TextMarshaler, start StartElement) error {
-	if err := p.writeStart(&start); err != nil {
+	if err := p.writeStart(&start, false); err != nil {
 		return err
 	}
 	text, err := val.MarshalText()
@@ -760,7 +774,8 @@ func (p *printer) marshalTextInterface(val encoding.TextMarshaler, start StartEl
 }
 
 // writeStart writes the given start element.
-func (p *printer) writeStart(start *StartElement) error {
+// If close is true, it is written as a self-closing element.
+func (p *printer) writeStart(start *StartElement, close bool) error {
 	if start.Name.Local == "" {
 		return fmt.Errorf("xml: start tag with no name")
 	}
@@ -858,7 +873,13 @@ func (p *printer) writeStart(start *StartElement) error {
 		p.EscapeString(attr.Value)
 		p.WriteByte('"')
 	}
-	p.WriteByte('>')
+	if close {
+		p.WriteString("/>")
+		// Pop elements stack
+		p.elements = p.elements[:len(p.elements)-1]
+	} else {
+		p.WriteByte('>')
+	}
 	return nil
 }
 
@@ -1217,7 +1238,7 @@ func (s *parentStack) trim(parents []string) error {
 // push adds parent elements to the stack and writes open tags.
 func (s *parentStack) push(parents []string) error {
 	for i := 0; i < len(parents); i++ {
-		if err := s.p.writeStart(&StartElement{Name: Name{Local: parents[i]}}); err != nil {
+		if err := s.p.writeStart(&StartElement{Name: Name{Local: parents[i]}}, false); err != nil {
 			return err
 		}
 	}
