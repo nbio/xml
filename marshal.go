@@ -140,6 +140,21 @@ func MarshalIndent(v any, prefix, indent string) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
+// MarshalSelfClosing works like [Marshal], but any empty xml tags are
+// rendered as self-closing tags.
+func MarshalSelfClosing(v any) ([]byte, error) {
+	var b bytes.Buffer
+	enc := NewEncoder(&b)
+	enc.SelfClosing(true)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	if err := enc.Close(); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
 // An Encoder writes XML data to an output stream.
 type Encoder struct {
 	p printer
@@ -158,6 +173,12 @@ func NewEncoder(w io.Writer) *Encoder {
 func (enc *Encoder) Indent(prefix, indent string) {
 	enc.p.prefix = prefix
 	enc.p.indent = indent
+}
+
+// SelfClosing sets the encoder to generate XML in which each element
+// with no content will be rendered as self-closing.
+func (enc *Encoder) SelfClosing(selfclosing bool) {
+	enc.p.selfclosing = selfclosing
 }
 
 // Encode writes the XML encoding of v to the stream.
@@ -351,17 +372,19 @@ func joinPrefixed(prefix, name string) string {
 }
 
 type printer struct {
-	w          *bufio.Writer
-	encoder    *Encoder
-	seq        int
-	indent     string
-	prefix     string
-	depth      int
-	indentedIn bool
-	putNewline bool
-	elements   []element
-	closed     bool
-	err        error
+	w           *bufio.Writer
+	encoder     *Encoder
+	seq         int
+	indent      string
+	prefix      string
+	depth       int
+	indentedIn  bool
+	putNewline  bool
+	elements    []element
+	closed      bool
+	err         error
+	selfclose   *StartElement
+	selfclosing bool
 }
 
 // getPrefix finds the prefix to use for the given namespace URI, but does not create it.
@@ -858,7 +881,11 @@ func (p *printer) writeStart(start *StartElement) error {
 		p.EscapeString(attr.Value)
 		p.WriteByte('"')
 	}
-	p.WriteByte('>')
+	if p.selfclosing {
+		p.selfclose = start
+	} else {
+		p.WriteByte('>')
+	}
 	return nil
 }
 
@@ -883,6 +910,21 @@ func (p *printer) writeEnd(name Name) error {
 	if name.Space != e.xmlns {
 		return fmt.Errorf("xml: end namespace %q does not match start namespace %q", name.Space, e.xmlns)
 	}
+
+	if p.selfclose != nil && p.selfclose.Name == name {
+		p.selfclose = nil
+
+		p.WriteByte('/')
+		p.WriteByte('>')
+
+		// Pop elements stack
+		p.elements = p.elements[:len(p.elements)-1]
+
+		p.writeIndentDecrement()
+
+		return nil
+	}
+
 	p.writeIndent(-1)
 	p.WriteByte('<')
 	p.WriteByte('/')
@@ -1109,6 +1151,11 @@ func (p *printer) Write(b []byte) (n int, err error) {
 		p.err = errors.New("use of closed Encoder")
 	}
 	if p.err == nil {
+		if p.selfclose != nil && len(b) > 0 {
+			p.selfclose = nil
+			p.w.WriteByte('>')
+		}
+
 		n, p.err = p.w.Write(b)
 	}
 	return n, p.err
@@ -1120,6 +1167,11 @@ func (p *printer) WriteString(s string) (n int, err error) {
 		p.err = errors.New("use of closed Encoder")
 	}
 	if p.err == nil {
+		if p.selfclose != nil && len(s) > 0 {
+			p.selfclose = nil
+			p.w.WriteByte('>')
+		}
+
 		n, p.err = p.w.WriteString(s)
 	}
 	return n, p.err
@@ -1131,6 +1183,11 @@ func (p *printer) WriteByte(c byte) error {
 		p.err = errors.New("use of closed Encoder")
 	}
 	if p.err == nil {
+		if p.selfclose != nil {
+			p.selfclose = nil
+			p.w.WriteByte('>')
+		}
+
 		p.err = p.w.WriteByte(c)
 	}
 	return p.err
@@ -1159,17 +1216,30 @@ func (p *printer) cachedWriteError() error {
 	return err
 }
 
+func (p *printer) writeIndentDecrement() bool {
+	p.depth--
+	if p.indentedIn {
+		p.indentedIn = false
+		return true
+	}
+	p.indentedIn = false
+
+	return false
+}
+
+func (p *printer) writeIndentIncrement() {
+	p.depth++
+	p.indentedIn = true
+}
+
 func (p *printer) writeIndent(depthDelta int) {
 	if len(p.prefix) == 0 && len(p.indent) == 0 {
 		return
 	}
 	if depthDelta < 0 {
-		p.depth--
-		if p.indentedIn {
-			p.indentedIn = false
+		if p.writeIndentDecrement() {
 			return
 		}
-		p.indentedIn = false
 	}
 	if p.putNewline {
 		p.WriteByte('\n')
@@ -1185,8 +1255,7 @@ func (p *printer) writeIndent(depthDelta int) {
 		}
 	}
 	if depthDelta > 0 {
-		p.depth++
-		p.indentedIn = true
+		p.writeIndentIncrement()
 	}
 }
 
