@@ -578,6 +578,7 @@ var marshalTests = []struct {
 	MarshalError   string
 	UnmarshalOnly  bool
 	UnmarshalError string
+	Selfclosing    bool
 }{
 	// Test nil marshals to nothing
 	{Value: nil, ExpectXML: ``, MarshalOnly: true},
@@ -749,6 +750,25 @@ var marshalTests = []struct {
 			`</Items>` +
 			`</result>`,
 		MarshalOnly: true,
+	},
+	{
+		Value: &NestedItems{Items: []string{"abc", ""}, Item1: []string{}},
+		ExpectXML: `<result>` +
+			`<Items>` +
+			`<item>abc</item>` +
+			`<item/>` +
+			`</Items>` +
+			`</result>`,
+		MarshalOnly: true,
+		Selfclosing: true,
+	},
+	{
+		Value: &NestedItems{Items: []string{}, Item1: []string{}},
+		ExpectXML: `<result>` +
+			`<Items/>` +
+			`</result>`,
+		MarshalOnly: true,
+		Selfclosing: true,
 	},
 	{
 		Value: &NestedItems{Items: nil, Item1: []string{"A"}},
@@ -1284,6 +1304,16 @@ var marshalTests = []struct {
 		ExpectXML: `<Strings><A></A></Strings>`,
 		Value:     &Strings{},
 	},
+	{
+		ExpectXML:   `<Strings><A/></Strings>`,
+		Value:       &Strings{},
+		Selfclosing: true,
+	},
+	{
+		ExpectXML:   `<Strings><A><B>abc</B></A></Strings>`,
+		Value:       &Strings{X: []string{"abc"}},
+		Selfclosing: true,
+	},
 	// Custom marshalers.
 	{
 		ExpectXML: `<MyMarshalerTest>hello world</MyMarshalerTest>`,
@@ -1759,7 +1789,17 @@ func TestMarshal(t *testing.T) {
 		}
 
 		t.Run(fmt.Sprintf("%d", idx), func(t *testing.T) {
-			data, err := Marshal(test.Value)
+			var (
+				data []byte
+				err  error
+			)
+
+			if test.Selfclosing {
+				data, err = MarshalSelfClosing(test.Value)
+			} else {
+				data, err = Marshal(test.Value)
+			}
+
 			if err != nil {
 				if test.MarshalError == "" {
 					t.Errorf("marshal(%#v): %s", test.Value, err)
